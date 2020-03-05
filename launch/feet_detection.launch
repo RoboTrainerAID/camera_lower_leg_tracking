@@ -1,0 +1,30 @@
+
+<launch>
+ 
+ <?ignore
+
+    <node pkg="static_transform_mux" name="static_transform_mux" type="static_transform_mux" />
+
+ ?>
+ 
+    "<node name="robot_camera_transform" pkg="tf2_ros" type="static_transform_publisher" args="-0.375 0 0.75 3.14 1.1 0.0 base_link camera_link" />
+    <node name="camera_optical_transform" pkg="tf2_ros" type="static_transform_publisher" args="0 -0.02 0 0 0 0 1 camera_link camera_depth_frame" />
+    <node name="camera_depth_optical_frame_transform" pkg="tf2_ros" type="static_transform_publisher" args="0 0 0 -0.5 0.5 -0.5 0.5 camera_depth_frame camera_depth_optical_frame" />
+        
+    <node pkg="camera_lower_leg_tracking" name="feet_detection" type="feet_detection_node" output="screen">
+        <param name="ground_level" value="0.005" />
+        <param name="point_size_post_init" value="0.01" />
+        <param name="point_size_pre_init" value="0.001" />
+        <param name="min_cluster_size_post_init" value="200" />
+        <param name="min_cluster_size_pre_init" value="2000" />
+        <param name="cluster_tolerance" value="0.03" />
+        <param name="icp_fitness_threshhold" value="0.0001" />
+        <param name="init_frontal_capture_frame" value="50" />
+        <param name="init_side_captured_frames" value="5" />
+        <param name="init_side_capture_start" value="30" />
+        <param name="foot_length" value="0.32" />
+        <param name="foot_height" value="0.14" />
+        <param name="perform_side_init" value="-1" />
+        <rosparam command="load" file="$(find camera_lower_leg_tracking)/include/KalmanFilterParameters.yaml"/>
+    </node>
+</launch>

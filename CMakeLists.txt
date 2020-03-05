@@ -7,7 +7,27 @@ project(camera_lower_leg_tracking)
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
-find_package(catkin REQUIRED)
+find_package(catkin REQUIRED COMPONENTS roscpp
+    pcl_ros
+    sensor_msgs
+    genmsg
+    geometry_msgs
+    visualization_msgs
+    tf2
+    tf2_ros
+    tf2_msgs
+    tf2_sensor_msgs
+    std_msgs
+    iirob_filters)
+    
+find_package(PCL 1.7 REQUIRED)
+
+include(CheckCXXCompilerFlag)
+CHECK_CXX_COMPILER_FLAG("-std=c++11" Cpp11CompilerFlag)
+if (Cpp11CompilerFlag)
+       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+
+endif()
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -45,15 +65,13 @@ find_package(catkin REQUIRED)
 ## Generate messages in the 'msg' folder
 # add_message_files(
 #   FILES
-#   Message1.msg
-#   Message2.msg
+#   Foot_Reference.msg
 # )
 
 ## Generate services in the 'srv' folder
 # add_service_files(
 #   FILES
-#   Service1.srv
-#   Service2.srv
+#   Init_Foot_Reference.srv
 # )
 
 ## Generate actions in the 'action' folder
@@ -66,7 +84,8 @@ find_package(catkin REQUIRED)
 ## Generate added messages and services with any dependencies listed here
 # generate_messages(
 #   DEPENDENCIES
-#   std_msgs  # Or other packages containing msgs
+#   std_msgs
+#   sensor_msgs # Or other packages containing msgs
 # )
 
 ################################################
@@ -99,10 +118,10 @@ find_package(catkin REQUIRED)
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-#  INCLUDE_DIRS include
-#  LIBRARIES camera_lower_leg_tracking
-#  CATKIN_DEPENDS other_catkin_pkg
-#  DEPENDS system_lib
+  INCLUDE_DIRS include
+  LIBRARIES camera_lower_leg_tracking
+  CATKIN_DEPENDS roscpp sensor_msgs message_runtime geometry_msgs
+ # DEPENDS system_lib
 )
 
 ###########
@@ -112,8 +131,9 @@ catkin_package(
 ## Specify additional locations of header files
 ## Your package locations should be listed before other locations
 include_directories(
-# include
-# ${catkin_INCLUDE_DIRS}
+  include
+  srv
+  ${catkin_INCLUDE_DIRS}
 )
 
 ## Declare a C++ library
@@ -129,7 +149,15 @@ include_directories(
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
 ## The recommended prefix ensures that target names across packages don't collide
-# add_executable(${PROJECT_NAME}_node src/camera_lower_leg_tracking_node.cpp)
+
+add_executable(feet_detection_node src/feet_detection_node.cpp)
+target_link_libraries(feet_detection_node ${catkin_LIBRARIES})
+
+add_executable(toe_detection_node src/toe_detection_node.cpp)
+target_link_libraries(toe_detection_node ${catkin_LIBRARIES})
+
+add_executable(fix_foot_axis src/fix_foot_axis.cpp)
+target_link_libraries(fix_foot_axis ${catkin_LIBRARIES})
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the

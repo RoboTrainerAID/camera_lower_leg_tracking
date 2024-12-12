@@ -782,6 +782,7 @@ int main (int argc, char** argv) {
     // Initialize ROS
     ros::init (argc, argv, "feet_detection");
     ros::NodeHandle nh;
+//     ros::NodeHandle nh("~");
 
     tf2_ros::Buffer tfBuffer;
     tf2_ros::TransformListener tfListener(tfBuffer);
@@ -794,7 +795,7 @@ int main (int argc, char** argv) {
     }
 
     // Create a ROS subscriber for the input point cloud
-    ros::Subscriber sub_camera_image = nh.subscribe ("/camera/depth_registered/points", 1, cloud_cb);
+    ros::Subscriber sub_camera_image = nh.subscribe ("input_pc", 1, cloud_cb);
 //     ros::Subscriber laserscanner_fst_leg = nh.subscribe ("/leg_detection/pos_vel_acc_fst_leg", 1, laserscanner_fst_leg_cb);
 //     ros::Subscriber laserscanner_snd_leg = nh.subscribe ("/leg_detection/pos_vel_acc_snd_leg", 1, laserscanner_snd_leg_cb);
 
@@ -825,8 +826,8 @@ int main (int argc, char** argv) {
 
     pub_foot_strip = nh.advertise<sensor_msgs::PointCloud2>("footStrip", 1);
 
-    pub_left_laserscanner = nh.advertise<geometry_msgs::PointStamped>("pub_left_laserscanner", 1);
-    pub_right_laserscanner = nh.advertise<geometry_msgs::PointStamped>("pub_right_laserscanner", 1);
+//     pub_left_laserscanner = nh.advertise<geometry_msgs::PointStamped>("pub_left_laserscanner", 1);
+//     pub_right_laserscanner = nh.advertise<geometry_msgs::PointStamped>("pub_right_laserscanner", 1);
 
     kFilter_left = new KalmanFilter();
     kFilter_right = new KalmanFilter();
@@ -847,7 +848,6 @@ int main (int argc, char** argv) {
         ros::param::get("~foot_height", FOOT_HEIGHT);
         ros::param::get("~point_size_post_init", POINT_SIZE);
         ros::param::get("~min_cluster_size_post_init", MIN_CLUSTER_SIZE);
-
 
         init_side_done = true;
         ROS_INFO("DONT NEED A SIDE INIT! FOOT PARAMETERS WILL BE USED");

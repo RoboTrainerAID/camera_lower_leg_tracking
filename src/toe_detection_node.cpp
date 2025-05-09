@@ -1,41 +1,54 @@
-
 #include "ros/ros.h"
 #include "../include/pcl_types.h"
 
 
-#define GND_LEVEL (0.01)
-#define POINT_SIZE (0.01)
-#define CLUSTER_TOLERANCE (0.03)
+double GND_LEVEL, CLUSTER_TOLERANCE, POINT_SIZE;
+std::string INPUT_POINTCLOUD_TOPIC, CAMERA_DEPTH_FRAME_ID;
 
 
 geometry_msgs::TransformStamped transformStamped;
-ros::Publisher pub_left_leg, pub_right_leg, pub_left_toe, pub_right_toe;
+ros::Publisher pub_left_leg, pub_right_leg, pub_left_toe, pub_right_toe, pub_debug;
 // geometry_msgs::PointStamped old_right_toe, old_left_toe;
 // float addedDistancesLeft = 0, addedDistancesRight = 0;
 // int iterations = 0;
 
 Cloud removeGround(sensor_msgs::PointCloud2 input_cloud) {
 //     ROS_INFO("Tranform frame is %s und %s", transformStamped.header.frame_id.c_str(), transformStamped.child_frame_id.c_str());
+    ros::Time start = ros::Time::now();
+    Cloud input_cloud_pcl, input_cloud_downsampled, input_cloud_transformed;
+    
+    //Transformation in ros
+    // sensor_msgs::PointCloud2 sens_msg_input_cloud_tr;
+    // tf2::doTransform(input_cloud, sens_msg_input_cloud_tr, transformStamped);
 
-    sensor_msgs::PointCloud2 sens_msg_input_cloud_tr;
-    //Transformation
-    tf2::doTransform(input_cloud, sens_msg_input_cloud_tr, transformStamped);
-
-
-    Cloud input_cloud_tr;
     //Conversion from sensor_msgs::PointCloud2 to Cloud
-    pcl::fromROSMsg(sens_msg_input_cloud_tr,input_cloud_tr);
+    pcl::fromROSMsg(input_cloud, input_cloud_pcl);
 
+    // ROS_INFO("PointCloud before filtering has: %lu data points", input_cloud_pcl.points.size());
+    // Create the filtering object: downsample the dataset using a leaf size of 1cm
+    pcl::VoxelGrid<Point> vg;
+    vg.setInputCloud(input_cloud_pcl.makeShared());
+    vg.setLeafSize(POINT_SIZE, POINT_SIZE, POINT_SIZE);
+    vg.filter(input_cloud_downsampled);
+    // ROS_INFO("PointCloud after filtering has: %lu data points", input_cloud_downsampled.points.size()); 
+    ros::Time downsampling = ros::Time::now();
+    ROS_INFO("DOWNSAMPLING TOOK %f SECONDS", (downsampling - start).toSec());
+
+    //Transformation in pcl
+    pcl::transformPointCloud(input_cloud_downsampled, input_cloud_transformed, tf2::transformToEigen(transformStamped.transform).matrix());
+
+    ros::Time conversion = ros::Time::now();
+    ROS_INFO("CONVERSION TOOK %f SECONDS", (conversion - start).toSec());
 
     //Delete the GroundPoints
     Indices object_indices;
-    for( size_t i = 0; i < input_cloud_tr.size(); i++ ) {
-        float z = input_cloud_tr.points[i].z;
+    for( size_t i = 0; i < input_cloud_transformed.size(); i++ ) {
+        float z = input_cloud_transformed.points[i].z;
         if( z > GND_LEVEL) {
             object_indices.push_back(i);
         }
     }
-    Cloud output(input_cloud_tr, object_indices );
+    Cloud output(input_cloud_transformed, object_indices );
     return output;
 }
 
@@ -138,33 +151,34 @@ std::vector<Cloud> splitLegs(Cloud input_cloud) {
 
     Cloud_ptr input_cloud_ptr = input_cloud.makeShared();
 
+    // TODO: (Andreas) Moved the downsampling at beginning before remove Ground
 //     ROS_INFO("PointCloud before filtering has: %lu data points", input_cloud.points.size());
     // Create the filtering object: downsample the dataset using a leaf size of 1cm
-    pcl::VoxelGrid<Point> vg;
-    Cloud_ptr cloud_filtered(new Cloud);
-    vg.setInputCloud (input_cloud_ptr);
-    vg.setLeafSize (POINT_SIZE, POINT_SIZE, POINT_SIZE);
-    vg.filter (*cloud_filtered);
+    // pcl::VoxelGrid<Point> vg;
+    // Cloud_ptr cloud_filtered(new Cloud);
+    // vg.setInputCloud (input_cloud_ptr);
+    // vg.setLeafSize (POINT_SIZE, POINT_SIZE, POINT_SIZE);
+    // vg.filter (*cloud_filtered);
 //     ROS_INFO("PointCloud after filtering has: %lu data points", cloud_filtered->points.size());
 
     std::vector<Cloud> legs;
 
 
-    if (cloud_filtered->empty()) {
+    if (input_cloud_ptr->empty()) {
         ROS_INFO("Input is empty");
         return legs;
     }
 
     // Creating the KdTree object for the search method of the extraction
     pcl::search::KdTree<Point>::Ptr tree (new pcl::search::KdTree<Point>);
-    tree->setInputCloud (cloud_filtered);
+    tree->setInputCloud (input_cloud_ptr);
 
     //Setting the parameters for cluster extraction
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<Point> ec;
     ec.setClusterTolerance(CLUSTER_TOLERANCE);
     ec.setSearchMethod(tree);
-    ec.setInputCloud(cloud_filtered);
+    ec.setInputCloud(input_cloud_ptr);
     ec.setMinClusterSize(200);
     ec.extract(cluster_indices);
 
@@ -175,7 +189,7 @@ std::vector<Cloud> splitLegs(Cloud input_cloud) {
     for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); ++it)
     {
 //         ROS_INFO("Cluster %d has %lu points", i++, cluster_indices.at(i).indices.size());
-        Cloud cloud_cluster(*cloud_filtered, it->indices );
+        Cloud cloud_cluster(*input_cloud_ptr, it->indices );
         clusters.push_back(cloud_cluster);
     }
 
@@ -205,6 +219,10 @@ std::vector<Cloud> splitLegs(Cloud input_cloud) {
 void cloud_cb (sensor_msgs::PointCloud2 input_cloud) {
     ros::Time start = ros::Time::now();
     Cloud removedGround = removeGround(input_cloud);
+    pub_debug.publish(removedGround);
+
+    ros::Time ground = ros::Time::now();
+    ROS_INFO("REMOVE GROUND TOOK %f SECONDS", (ground - start).toSec());
     std::vector<Cloud> legs = splitLegs(removedGround);
     if (legs.size() == 2) {
         Cloud left_leg = legs[0];
@@ -240,22 +258,30 @@ int main (int argc, char** argv) {
     ros::init (argc, argv, "toe_detection");
     ros::NodeHandle nh;
 
+    nh.param("~ground_level", GND_LEVEL, 0.01);
+    nh.param("~cluster_tolerance", CLUSTER_TOLERANCE, 0.03);
+    nh.param("~point_size", POINT_SIZE, 0.01);
+    nh.param("~input_pointcloud_topic", INPUT_POINTCLOUD_TOPIC, std::string("/camera/depth_registered/points"));
+    nh.param("~camera_depth_frame_id", CAMERA_DEPTH_FRAME_ID, std::string("camera_depth_optical_frame"));
+
     tf2_ros::Buffer tfBuffer;
     tf2_ros::TransformListener tfListener(tfBuffer);
 
     try {
-        transformStamped = tfBuffer.lookupTransform("base_link", "camera_depth_optical_frame", ros::Time(0), ros::Duration(2));
+        transformStamped = tfBuffer.lookupTransform("base_link", CAMERA_DEPTH_FRAME_ID, ros::Time(0), ros::Duration(2));
     } catch (tf2::TransformException &ex) {
         ROS_WARN("%s", ex.what());
     }
 
     // Create a ROS subscriber for the input point cloud
-    ros::Subscriber sub = nh.subscribe ("/camera/depth_registered/points", 1, cloud_cb);
+    ros::Subscriber sub = nh.subscribe (INPUT_POINTCLOUD_TOPIC, 1, cloud_cb);
 
     pub_left_leg = nh.advertise<sensor_msgs::PointCloud2>("left_leg", 1);
     pub_right_leg = nh.advertise<sensor_msgs::PointCloud2>("right_leg", 1);
     pub_left_toe = nh.advertise<geometry_msgs::PointStamped>("left_toe", 1);
     pub_right_toe = nh.advertise<geometry_msgs::PointStamped>("right_toe", 1);
+
+    pub_debug = nh.advertise<sensor_msgs::PointCloud2>("toe_debug", 1);
 
     ros::spin();
     return 0;

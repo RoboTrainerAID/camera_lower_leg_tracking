@@ -782,12 +782,11 @@ bool init_reset(std_srvs::Trigger::Request& request, std_srvs::Trigger::Response
 int main (int argc, char** argv) {
     // Initialize ROS
     ros::init (argc, argv, "feet_detection");
-    ros::NodeHandle nh;
-//     ros::NodeHandle nh("~");
+    ros::NodeHandle nh("~");
 
 
-    nh.param("~input_pointcloud_topic", INPUT_POINTCLOUD_TOPIC, std::string("/camera/depth_registered/points"));
-    nh.param("~camera_depth_frame_id", CAMERA_DEPTH_FRAME_ID, std::string("camera_depth_optical_frame"));
+    nh.param("input_pointcloud_topic", INPUT_POINTCLOUD_TOPIC, std::string("/camera/depth_registered/points"));
+    nh.param("camera_depth_frame_id", CAMERA_DEPTH_FRAME_ID, std::string("camera_rgb_optical_frame"));
 
     tf2_ros::Buffer tfBuffer;
     tf2_ros::TransformListener tfListener(tfBuffer);

@@ -35,7 +35,8 @@ Cloud removeGround(sensor_msgs::PointCloud2 input_cloud) {
     ROS_INFO("DOWNSAMPLING TOOK %f SECONDS", (downsampling - start).toSec());
 
     //Transformation in pcl
-    pcl::transformPointCloud(input_cloud_downsampled, input_cloud_transformed, tf2::transformToEigen(transformStamped.transform).matrix());
+    pcl::transformPointCloud(input_cloud_downsampled, input_cloud_transformed, tf2::transformToEigen(transformStamped).matrix());
+    input_cloud_transformed.header.frame_id = "base_link";
 
     ros::Time conversion = ros::Time::now();
     ROS_INFO("CONVERSION TOOK %f SECONDS", (conversion - start).toSec());
@@ -256,21 +257,22 @@ void cloud_cb (sensor_msgs::PointCloud2 input_cloud) {
 int main (int argc, char** argv) {
     // Initialize ROS
     ros::init (argc, argv, "toe_detection");
-    ros::NodeHandle nh;
+    ros::NodeHandle nh("~");
 
-    nh.param("~ground_level", GND_LEVEL, 0.01);
-    nh.param("~cluster_tolerance", CLUSTER_TOLERANCE, 0.03);
-    nh.param("~point_size", POINT_SIZE, 0.01);
-    nh.param("~input_pointcloud_topic", INPUT_POINTCLOUD_TOPIC, std::string("/camera/depth_registered/points"));
-    nh.param("~camera_depth_frame_id", CAMERA_DEPTH_FRAME_ID, std::string("camera_depth_optical_frame"));
+    nh.param("ground_level", GND_LEVEL, 0.01);
+    nh.param("cluster_tolerance", CLUSTER_TOLERANCE, 0.03);
+    nh.param("point_size", POINT_SIZE, 0.01);
+    nh.param("input_pointcloud_topic", INPUT_POINTCLOUD_TOPIC, std::string("/camera/depth_registered/points"));
+    nh.param("camera_depth_frame_id", CAMERA_DEPTH_FRAME_ID, std::string("camera_rgb_optical_frame"));
 
     tf2_ros::Buffer tfBuffer;
     tf2_ros::TransformListener tfListener(tfBuffer);
 
     try {
-        transformStamped = tfBuffer.lookupTransform("base_link", CAMERA_DEPTH_FRAME_ID, ros::Time(0), ros::Duration(2));
+        transformStamped = tfBuffer.lookupTransform("base_link", CAMERA_DEPTH_FRAME_ID, ros::Time(0), ros::Duration(5));
     } catch (tf2::TransformException &ex) {
-        ROS_WARN("%s", ex.what());
+        ROS_ERROR("%s", ex.what());
+        return -1;
     }
 
     // Create a ROS subscriber for the input point cloud

@@ -19,6 +19,7 @@ bool init_front_done = false, init_side_done = false;
 
 float GND_LEVEL, ICP_FITNESS_THRESHHOLD, CLUSTER_TOLERANCE, POINT_SIZE, FOOT_HEIGHT, footLength;
 int MIN_CLUSTER_SIZE, INIT_FRONTAL_CAPTURE_FRAME, INIT_SIDE_CAPTURE_FRAME,  INIT_SIDE_END_FRAME;
+std::string INPUT_POINTCLOUD_TOPIC, CAMERA_DEPTH_FRAME_ID;
 
 float laserscanner_fst_leg_x, laserscanner_fst_leg_y, laserscanner_snd_leg_x, laserscanner_snd_leg_y, laserscanner_z = 0.2;
 
@@ -784,18 +785,22 @@ int main (int argc, char** argv) {
     ros::NodeHandle nh;
 //     ros::NodeHandle nh("~");
 
+
+    nh.param("~input_pointcloud_topic", INPUT_POINTCLOUD_TOPIC, std::string("/camera/depth_registered/points"));
+    nh.param("~camera_depth_frame_id", CAMERA_DEPTH_FRAME_ID, std::string("camera_depth_optical_frame"));
+
     tf2_ros::Buffer tfBuffer;
     tf2_ros::TransformListener tfListener(tfBuffer);
 
 
     try {
-        transformStamped = tfBuffer.lookupTransform("base_link", "camera_depth_optical_frame", ros::Time(0), ros::Duration(2));
+        transformStamped = tfBuffer.lookupTransform("base_link", CAMERA_DEPTH_FRAME_ID, ros::Time(0), ros::Duration(2));
     } catch (tf2::TransformException &ex) {
         ROS_WARN("%s", ex.what());
     }
 
     // Create a ROS subscriber for the input point cloud
-    ros::Subscriber sub_camera_image = nh.subscribe ("input_pc", 1, cloud_cb);
+    ros::Subscriber sub_camera_image = nh.subscribe (INPUT_POINTCLOUD_TOPIC, 1, cloud_cb);
 //     ros::Subscriber laserscanner_fst_leg = nh.subscribe ("/leg_detection/pos_vel_acc_fst_leg", 1, laserscanner_fst_leg_cb);
 //     ros::Subscriber laserscanner_snd_leg = nh.subscribe ("/leg_detection/pos_vel_acc_snd_leg", 1, laserscanner_snd_leg_cb);
 

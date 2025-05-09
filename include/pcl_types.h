@@ -20,6 +20,7 @@
 #include <tf2/convert.h>
 #include <tf2/transform_datatypes.h>
 #include <tf2_sensor_msgs/tf2_sensor_msgs.h>
+#include <tf2_eigen/tf2_eigen.h>
 
 #include <pcl_ros/transforms.h>
 #include "pcl_ros/point_cloud.h"

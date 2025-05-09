@@ -17,6 +17,7 @@ find_package(catkin REQUIRED COMPONENTS roscpp
     tf2_ros
     tf2_msgs
     tf2_sensor_msgs
+    tf2_eigen
     std_msgs
     iirob_filters)
     

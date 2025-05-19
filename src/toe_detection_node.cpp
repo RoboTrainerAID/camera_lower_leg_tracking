@@ -1,116 +1,150 @@
 #include "ros/ros.h"
 #include "../include/pcl_types.h"
+#include "../include/rosPointCloud2ToPCL.hpp"
+// Drop in replacement for pcl::fromROSMsg (Davide Faconti)
 
 
-double GND_LEVEL, CLUSTER_TOLERANCE, POINT_SIZE;
+double MIN_Z, MAX_Z, MIN_Y, MAX_Y, CLUSTER_TOLERANCE, DONWSAMPLE_POINT_SIZE;
+bool PUBLISH_DEBUG;
+int MIN_CLUSTER_SIZE;
 std::string INPUT_POINTCLOUD_TOPIC, CAMERA_DEPTH_FRAME_ID;
-
 
 geometry_msgs::TransformStamped transformStamped;
 ros::Publisher pub_left_leg, pub_right_leg, pub_left_toe, pub_right_toe, pub_debug;
-// geometry_msgs::PointStamped old_right_toe, old_left_toe;
-// float addedDistancesLeft = 0, addedDistancesRight = 0;
-// int iterations = 0;
 
-Cloud removeGround(sensor_msgs::PointCloud2 input_cloud) {
-//     ROS_INFO("Tranform frame is %s und %s", transformStamped.header.frame_id.c_str(), transformStamped.child_frame_id.c_str());
-    ros::Time start = ros::Time::now();
-    Cloud input_cloud_pcl, input_cloud_downsampled, input_cloud_transformed;
-    
-    //Transformation in ros
-    // sensor_msgs::PointCloud2 sens_msg_input_cloud_tr;
-    // tf2::doTransform(input_cloud, sens_msg_input_cloud_tr, transformStamped);
+Cloud_ptr removeGround(const Cloud_ptr &input_pcl) {
+    // ros::Time start = ros::Time::now();
 
-    //Conversion from sensor_msgs::PointCloud2 to Cloud
-    pcl::fromROSMsg(input_cloud, input_cloud_pcl);
+    // Avoid copies by using shared pointers
+    Cloud_ptr transformed_pcl   = boost::make_shared<Cloud>();
+    Cloud_ptr filtered_z_pcl    = boost::make_shared<Cloud>();
+    Cloud_ptr filtered_y_pcl    = boost::make_shared<Cloud>();
+    Cloud_ptr downsampled_pcl   = boost::make_shared<Cloud>();
 
-    // ROS_INFO("PointCloud before filtering has: %lu data points", input_cloud_pcl.points.size());
-    // Create the filtering object: downsample the dataset using a leaf size of 1cm
+    // Downsampling
     pcl::VoxelGrid<Point> vg;
-    vg.setInputCloud(input_cloud_pcl.makeShared());
-    vg.setLeafSize(POINT_SIZE, POINT_SIZE, POINT_SIZE);
-    vg.filter(input_cloud_downsampled);
-    // ROS_INFO("PointCloud after filtering has: %lu data points", input_cloud_downsampled.points.size()); 
-    ros::Time downsampling = ros::Time::now();
-    ROS_INFO("DOWNSAMPLING TOOK %f SECONDS", (downsampling - start).toSec());
+    vg.setInputCloud(input_pcl);
+    vg.setLeafSize(DONWSAMPLE_POINT_SIZE, DONWSAMPLE_POINT_SIZE, DONWSAMPLE_POINT_SIZE);
+    vg.filter(*downsampled_pcl);
 
-    //Transformation in pcl
-    pcl::transformPointCloud(input_cloud_downsampled, input_cloud_transformed, tf2::transformToEigen(transformStamped).matrix());
-    input_cloud_transformed.header.frame_id = "base_link";
+    // ros::Time downsampling = ros::Time::now();
+    // ROS_INFO("DOWNSAMPLING TOOK %f SECONDS", (downsampling - start).toSec());
 
-    ros::Time conversion = ros::Time::now();
-    ROS_INFO("CONVERSION TOOK %f SECONDS", (conversion - start).toSec());
+    // Transform
+    pcl::transformPointCloud(*downsampled_pcl, *transformed_pcl, tf2::transformToEigen(transformStamped).matrix());
+    transformed_pcl->header.frame_id = "base_link";
 
-    //Delete the GroundPoints
-    Indices object_indices;
-    for( size_t i = 0; i < input_cloud_transformed.size(); i++ ) {
-        float z = input_cloud_transformed.points[i].z;
-        if( z > GND_LEVEL) {
-            object_indices.push_back(i);
-        }
-    }
-    Cloud output(input_cloud_transformed, object_indices );
-    return output;
+    // ros::Time transTime = ros::Time::now();
+    // ROS_INFO("Transformation TOOK %f SECONDS", (transTime - downsampling).toSec());
+
+    // Remove ground with PassThrough (z-based)
+    pcl::PassThrough<Point> pass;
+    pass.setInputCloud(transformed_pcl);
+    pass.setFilterFieldName("z");
+    pass.setFilterLimits(MIN_Z, MAX_Z);
+    pass.filter(*filtered_z_pcl);
+
+    // Further filter by y-range
+    pcl::PassThrough<Point> pass_y;
+    pass_y.setInputCloud(filtered_z_pcl);
+    pass_y.setFilterFieldName("y");
+    pass_y.setFilterLimits(-0.4, 0.4);
+    pass_y.filter(*filtered_y_pcl);
+
+    // ros::Time passTime = ros::Time::now();
+    // ROS_INFO("PASSTHROUGH TOOK %f SECONDS", (passTime - transTime).toSec());
+
+    return filtered_y_pcl;
 }
 
-
-std::vector<Cloud> findOrientation(Cloud fst_leg, Cloud snd_leg) {
-    std::vector<Cloud> legs;
+std::vector<Cloud_ptr> findOrientation(Cloud_ptr fst_leg, Cloud_ptr snd_leg) {
+    std::vector<Cloud_ptr> legs;
     Point fst_centroid, snd_centroid;
 
-    pcl::computeCentroid (fst_leg, fst_centroid);
-    pcl::computeCentroid (snd_leg, snd_centroid);
+    pcl::computeCentroid(*fst_leg, fst_centroid);
+    pcl::computeCentroid(*snd_leg, snd_centroid);
 
     if (fst_centroid.y > snd_centroid.y) {
         legs.push_back(fst_leg);
         legs.push_back(snd_leg);
-    }
-    else {
+    } else {
         legs.push_back(snd_leg);
         legs.push_back(fst_leg);
     }
     return legs;
 }
 
-std::vector<Cloud> splitCluster(Cloud both_legs) {
-//     ROS_INFO("CLUSTER HAS %lu POINTS", both_legs.points.size());
-    std::vector<Cloud> legs;
+std::vector<Cloud_ptr> splitCluster(Cloud_ptr both_legs) {
+    std::vector<Cloud_ptr> legs;
     Point center;
-    pcl::computeCentroid (both_legs, center);
-    Cloud left_leg, right_leg;
-    if (both_legs.points.size() > 1000) {
-        Indices left_inds, right_inds;
-        for( size_t i = 0; i < both_legs.size(); i++ ) {
-            float y = both_legs.points[i].y;
-            if( y > center.y) {
-                left_inds.push_back(i);
-            }
-            else {
-                right_inds.push_back(i);
-            }
-        }
+    pcl::computeCentroid(*both_legs, center);
 
-        left_leg = Cloud(both_legs, left_inds);
-        right_leg= Cloud(both_legs, right_inds);
+    // ROS_INFO("SIZE OF BOTH LEGS: %d", both_legs->points.size());
+    if (both_legs->points.size() > 1000) {
+        // if yes, there are both legs visible but in same cluster
+        Indices left_inds, right_inds;
+        for (size_t i = 0; i < both_legs->size(); i++) {
+            float y = both_legs->points[i].y;
+            (y > center.y) ? left_inds.push_back(i) : right_inds.push_back(i);
+        }
+        Cloud_ptr left_leg  = boost::make_shared<Cloud>(*both_legs, left_inds);
+        Cloud_ptr right_leg = boost::make_shared<Cloud>(*both_legs, right_inds);
         legs.push_back(left_leg);
         legs.push_back(right_leg);
-        return legs;
-    }
-    if (center.y >= 0) {
-        ROS_INFO("ONLY LEFT LEG IN FRAME");
-        legs.push_back(both_legs);
-        legs.push_back(right_leg);
-    }
-    else {
-        ROS_INFO("ONLY RIGHT LEG IN FRAME");
-        legs.push_back(left_leg);
-        legs.push_back(both_legs);
+    } else {
+        if (center.y >= 0) {
+            ROS_INFO("ONLY LEFT LEG IN FRAME");
+            legs.push_back(both_legs);
+            legs.push_back(boost::make_shared<Cloud>()); // Empty right leg
+        } else {
+            ROS_INFO("ONLY RIGHT LEG IN FRAME");
+            legs.push_back(boost::make_shared<Cloud>()); // Empty left leg
+            legs.push_back(both_legs);
+        }
     }
     return legs;
 }
 
+std::vector<Cloud_ptr> splitLegs(Cloud_ptr input_cloud_ptr) {
+    std::vector<Cloud_ptr> legs;
+    std::vector<Cloud_ptr> clusters;
 
-//side can only be left or right!
+    if (input_cloud_ptr->empty()) {
+        ROS_INFO("Input is empty");
+        return legs;
+    }
+
+    // Clustering
+    pcl::search::KdTree<Point>::Ptr tree(new pcl::search::KdTree<Point>);
+    tree->setInputCloud(input_cloud_ptr);
+    std::vector<pcl::PointIndices> cluster_indices;
+    pcl::EuclideanClusterExtraction<Point> ec;
+    ec.setClusterTolerance(CLUSTER_TOLERANCE);
+    ec.setMinClusterSize(MIN_CLUSTER_SIZE);
+    ec.setSearchMethod(tree);
+    ec.setInputCloud(input_cloud_ptr);
+    ec.extract(cluster_indices);
+
+    for (auto const &indices : cluster_indices) {
+        Cloud_ptr cluster = boost::make_shared<Cloud>(*input_cloud_ptr, indices.indices);
+        // ROS_INFO("SIZE OF CLUSTER: %d", cluster->points.size());
+        clusters.push_back(cluster);
+    }
+
+    if (clusters.size() == 0) {
+        ROS_INFO("NO CLUSTER FOUND");
+    } else if (clusters.size() == 1) {
+        // Split the single cluster
+        auto splitted = splitCluster(clusters[0]);
+        legs.insert(legs.end(), splitted.begin(), splitted.end());
+    } else if (clusters.size() >= 2) {
+        // Use the first two for orientation, ignore the rest
+        auto oriented = findOrientation(clusters[0], clusters[1]);
+        legs.insert(legs.end(), oriented.begin(), oriented.end());
+    }
+    return legs;
+}
+
 geometry_msgs:: PointStamped findToe(Cloud input_cloud) {
 
     geometry_msgs::PointStamped maxX;
@@ -148,110 +182,47 @@ geometry_msgs:: PointStamped findToe(Cloud input_cloud) {
 //If there is no Cluster then legs will stay empty.
 //If both legs are one cluster it will get split in the middle
 //If only one leg is in the frame its Cloud will be as expected. The other Cloud will be empty.
-std::vector<Cloud> splitLegs(Cloud input_cloud) {
-
-    Cloud_ptr input_cloud_ptr = input_cloud.makeShared();
-
-    // TODO: (Andreas) Moved the downsampling at beginning before remove Ground
-//     ROS_INFO("PointCloud before filtering has: %lu data points", input_cloud.points.size());
-    // Create the filtering object: downsample the dataset using a leaf size of 1cm
-    // pcl::VoxelGrid<Point> vg;
-    // Cloud_ptr cloud_filtered(new Cloud);
-    // vg.setInputCloud (input_cloud_ptr);
-    // vg.setLeafSize (POINT_SIZE, POINT_SIZE, POINT_SIZE);
-    // vg.filter (*cloud_filtered);
-//     ROS_INFO("PointCloud after filtering has: %lu data points", cloud_filtered->points.size());
-
-    std::vector<Cloud> legs;
-
-
-    if (input_cloud_ptr->empty()) {
-        ROS_INFO("Input is empty");
-        return legs;
-    }
-
-    // Creating the KdTree object for the search method of the extraction
-    pcl::search::KdTree<Point>::Ptr tree (new pcl::search::KdTree<Point>);
-    tree->setInputCloud (input_cloud_ptr);
-
-    //Setting the parameters for cluster extraction
-    std::vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<Point> ec;
-    ec.setClusterTolerance(CLUSTER_TOLERANCE);
-    ec.setSearchMethod(tree);
-    ec.setInputCloud(input_cloud_ptr);
-    ec.setMinClusterSize(200);
-    ec.extract(cluster_indices);
-
-
-//     int i = 0;
-    std::vector<Cloud> clusters;
-    //Creating PointClouds for each cluster. clusters is sorted by the size of the cluster.
-    for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); ++it)
-    {
-//         ROS_INFO("Cluster %d has %lu points", i++, cluster_indices.at(i).indices.size());
-        Cloud cloud_cluster(*input_cloud_ptr, it->indices );
-        clusters.push_back(cloud_cluster);
-    }
-
-    if (clusters.size() == 0) {
-//         ROS_INFO("NO CLUSTER FOUND");
-
-    }
-    else if (clusters.size() == 1) {
-//         ROS_INFO("ONE CLUSTER with Size: %lu", clusters[0].size());
-        legs = splitCluster(clusters[0]);
-    }
-    else if (clusters.size() == 2) {
-        Cloud fst_leg = clusters[0];
-        Cloud snd_leg = clusters[1];
-        legs = findOrientation(fst_leg, snd_leg);
-    }
-    else {
-//         ROS_INFO("More than 2 Clusters detected. Only the 2 largest will be published.");
-        Cloud fst_leg = clusters[0];
-        Cloud snd_leg = clusters[1];
-        legs = findOrientation(fst_leg, snd_leg);
-    }
-    return legs;
-}
-
-
-void cloud_cb (sensor_msgs::PointCloud2 input_cloud) {
+void cloud_cb(const sensor_msgs::PointCloud2 &input_cloud) {
     ros::Time start = ros::Time::now();
-    Cloud removedGround = removeGround(input_cloud);
-    pub_debug.publish(removedGround);
 
-    ros::Time ground = ros::Time::now();
-    ROS_INFO("REMOVE GROUND TOOK %f SECONDS", (ground - start).toSec());
-    std::vector<Cloud> legs = splitLegs(removedGround);
+    // Conversion
+    Cloud_ptr input_pcl = boost::make_shared<Cloud>();
+    pcl_df::fromROSMsg(input_cloud, *input_pcl);
+
+    // ros::Time conTime = ros::Time::now();
+    // ROS_INFO("Conversion TOOK %f SECONDS", (conTime - start).toSec());
+
+    Cloud_ptr removedGround = removeGround(input_pcl);
+
+    // ros::Time ground = ros::Time::now();
+    // ROS_INFO("REMOVE GROUND TOOK %f SECONDS", (ground - conTime).toSec());
+    if(PUBLISH_DEBUG) {
+        pub_debug.publish(*removedGround);
+    }
+
+    std::vector<Cloud_ptr> legs = splitLegs(removedGround);
+
+    // ros::Time split = ros::Time::now();
+    // ROS_INFO("SPLIT LEGS TOOK %f SECONDS", (split - ground).toSec());
+
     if (legs.size() == 2) {
-        Cloud left_leg = legs[0];
-        Cloud right_leg = legs[1];
-//         iterations++;
-        if (!left_leg.empty()) {
-            geometry_msgs:: PointStamped left_toe = findToe(left_leg);
-//             float distance = sqrt(pow(old_left_toe.point.x - left_toe.point.x, 2) + pow(old_left_toe.point.y - left_toe.point.y, 2) + pow(old_left_toe.point.z - left_toe.point.z, 2));
-//             addedDistancesLeft += std::abs(distance);
-//             old_left_toe = left_toe;
-            pub_left_leg.publish(left_leg);
+        if (!legs[0]->empty()) {
+            geometry_msgs::PointStamped left_toe = findToe(*legs[0]);
             pub_left_toe.publish(left_toe);
+            if(PUBLISH_DEBUG) {
+                pub_left_leg.publish(*legs[0]);
+            }
         }
-        if (!right_leg.empty()) {
-            geometry_msgs:: PointStamped right_toe = findToe(right_leg);
-//             float distance = sqrt(pow(old_right_toe.point.x - right_toe.point.x, 2) + pow(old_right_toe.point.y - right_toe.point.y, 2) + pow(old_right_toe.point.z - right_toe.point.z, 2));
-//             addedDistancesRight += std::abs(distance);
-
-//             old_right_toe = right_toe;
-            pub_right_leg.publish(right_leg);
+        if (!legs[1]->empty()) {
+            geometry_msgs::PointStamped right_toe = findToe(*legs[1]);
             pub_right_toe.publish(right_toe);
+            if(PUBLISH_DEBUG) {
+                pub_right_leg.publish(*legs[1]);
+            }
         }
-//         ROS_INFO("The average distance in the LEFT toe is %fm", addedDistancesLeft/iterations);
-//         ROS_INFO("The average distance in the RIGHT toe is %fm", addedDistancesRight/iterations);
+    }
     ros::Time end = ros::Time::now();
     ROS_INFO("THIS CALLBACK TOOK %f SECONDS", (end - start).toSec());
-
-    }
 }
 
 int main (int argc, char** argv) {
@@ -259,9 +230,14 @@ int main (int argc, char** argv) {
     ros::init (argc, argv, "toe_detection");
     ros::NodeHandle nh("~");
 
-    nh.param("ground_level", GND_LEVEL, 0.01);
+    nh.param("min_z", MIN_Z, 0.01);
+    nh.param("max_z", MAX_Z, 0.3);
+    nh.param("min_y", MIN_Y, -0.4);
+    nh.param("max_y", MAX_Y, 0.4);
+    nh.param("min_cluster_size", MIN_CLUSTER_SIZE, 150);
     nh.param("cluster_tolerance", CLUSTER_TOLERANCE, 0.03);
-    nh.param("point_size", POINT_SIZE, 0.01);
+    nh.param("downsample_point_size", DONWSAMPLE_POINT_SIZE, 0.01);
+    nh.param("publish_debug", PUBLISH_DEBUG, false);
     nh.param("input_pointcloud_topic", INPUT_POINTCLOUD_TOPIC, std::string("/camera/depth_registered/points"));
     nh.param("camera_depth_frame_id", CAMERA_DEPTH_FRAME_ID, std::string("camera_rgb_optical_frame"));
 
@@ -278,12 +254,14 @@ int main (int argc, char** argv) {
     // Create a ROS subscriber for the input point cloud
     ros::Subscriber sub = nh.subscribe (INPUT_POINTCLOUD_TOPIC, 1, cloud_cb);
 
-    pub_left_leg = nh.advertise<sensor_msgs::PointCloud2>("left_leg", 1);
-    pub_right_leg = nh.advertise<sensor_msgs::PointCloud2>("right_leg", 1);
     pub_left_toe = nh.advertise<geometry_msgs::PointStamped>("left_toe", 1);
     pub_right_toe = nh.advertise<geometry_msgs::PointStamped>("right_toe", 1);
 
-    pub_debug = nh.advertise<sensor_msgs::PointCloud2>("toe_debug", 1);
+    if (PUBLISH_DEBUG) {
+        pub_left_leg = nh.advertise<sensor_msgs::PointCloud2>("left_leg", 1);
+        pub_right_leg = nh.advertise<sensor_msgs::PointCloud2>("right_leg", 1);
+        pub_debug = nh.advertise<sensor_msgs::PointCloud2>("toe_debug", 1);
+    }
 
     ros::spin();
     return 0;

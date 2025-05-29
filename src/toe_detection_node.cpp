@@ -10,7 +10,7 @@ int MIN_CLUSTER_SIZE;
 std::string INPUT_POINTCLOUD_TOPIC, CAMERA_DEPTH_FRAME_ID;
 
 geometry_msgs::TransformStamped transformStamped;
-ros::Publisher pub_left_leg, pub_right_leg, pub_left_toe, pub_right_toe, pub_debug;
+ros::Publisher pub_left_leg, pub_right_leg, pub_left_toe, pub_right_toe, pub_debug, pub_toes;
 
 Cloud_ptr removeGround(const Cloud_ptr &input_pcl) {
     // ros::Time start = ros::Time::now();
@@ -145,35 +145,32 @@ std::vector<Cloud_ptr> splitLegs(Cloud_ptr input_cloud_ptr) {
     return legs;
 }
 
-geometry_msgs:: PointStamped findToe(Cloud input_cloud) {
+geometry_msgs::Point findToe(Cloud input_cloud) {
 
-    geometry_msgs::PointStamped maxX;
-    maxX.header.stamp = ros::Time::now();
-    maxX.header.frame_id = "base_link";
-    maxX.header.seq++;
+    geometry_msgs::Point maxX;
     if (!input_cloud.empty()) {
-        maxX.point.x = input_cloud.points[0].x;
-        maxX.point.y = input_cloud.points[0].y;
-        maxX.point.z = input_cloud.points[0].z;
+        maxX.x = input_cloud.points[0].x;
+        maxX.y = input_cloud.points[0].y;
+        maxX.z = input_cloud.points[0].z;
 
         for(size_t i = 0; i < input_cloud.size(); i++ ) {
             float X = input_cloud.points[i].x;
-            if( X > maxX.point.x) {
-                maxX.point.x = input_cloud.points[i].x;
-                maxX.point.y = input_cloud.points[i].y;
-                maxX.point.z = input_cloud.points[i].z;
+            if( X > maxX.x) {
+                maxX.x = input_cloud.points[i].x;
+                maxX.y = input_cloud.points[i].y;
+                maxX.z = input_cloud.points[i].z;
             }
         }
         Indices inds;
         for (int i = 0; i < input_cloud.size(); i++) {
-            if  ((input_cloud.points[i].x + 0.02) >= maxX.point.x) {
+            if  ((input_cloud.points[i].x + 0.02) >= maxX.x) {
                 inds.push_back(i);
             }
         }
         Cloud frontalPoints(input_cloud, inds);
         Point centroid;
         pcl::computeCentroid(frontalPoints, centroid);
-        maxX.point.y = centroid.y;
+        maxX.y = centroid.y;
     }
     return maxX;
 }
@@ -206,23 +203,35 @@ void cloud_cb(const sensor_msgs::PointCloud2 &input_cloud) {
     // ROS_INFO("SPLIT LEGS TOOK %f SECONDS", (split - ground).toSec());
 
     if (legs.size() == 2) {
-        if (!legs[0]->empty()) {
-            geometry_msgs::PointStamped left_toe = findToe(*legs[0]);
-            pub_left_toe.publish(left_toe);
-            if(PUBLISH_DEBUG) {
-                pub_left_leg.publish(*legs[0]);
-            }
-        }
-        if (!legs[1]->empty()) {
-            geometry_msgs::PointStamped right_toe = findToe(*legs[1]);
-            pub_right_toe.publish(right_toe);
-            if(PUBLISH_DEBUG) {
-                pub_right_leg.publish(*legs[1]);
-            }
+        // if (!legs[0]->empty()) {
+        //     geometry_msgs::PointStamped left_toe = findToe(*legs[0]);
+        //     pub_left_toe.publish(left_toe);
+        //     if(PUBLISH_DEBUG) {
+        //         pub_left_leg.publish(*legs[0]);
+        //     }
+        // }
+        // if (!legs[1]->empty()) {
+        //     geometry_msgs::PointStamped right_toe = findToe(*legs[1]);
+        //     pub_right_toe.publish(right_toe);
+        //     if(PUBLISH_DEBUG) {
+        //         pub_right_leg.publish(*legs[1]);
+        //     }
+        // }
+        if (!legs[0]->empty() && !legs[1]->empty()) {
+            geometry_msgs::PoseArray toe_positions;
+            toe_positions.header.stamp = ros::Time::now();
+            toe_positions.header.frame_id = "base_link";
+            toe_positions.header.seq++;
+            toe_positions.poses.resize(2);
+            toe_positions.poses[0].position = findToe(*legs[0]);
+            toe_positions.poses[1].position = findToe(*legs[1]);
+            pub_toes.publish(toe_positions);
         }
     }
     ros::Time end = ros::Time::now();
-    ROS_INFO("THIS CALLBACK TOOK %f SECONDS", (end - start).toSec());
+    if (PUBLISH_DEBUG) {
+        ROS_INFO("THIS CALLBACK TOOK %f SECONDS", (end - start).toSec());
+    }
 }
 
 int main (int argc, char** argv) {
@@ -254,8 +263,9 @@ int main (int argc, char** argv) {
     // Create a ROS subscriber for the input point cloud
     ros::Subscriber sub = nh.subscribe (INPUT_POINTCLOUD_TOPIC, 1, cloud_cb);
 
-    pub_left_toe = nh.advertise<geometry_msgs::PointStamped>("left_toe", 1);
-    pub_right_toe = nh.advertise<geometry_msgs::PointStamped>("right_toe", 1);
+    pub_toes = nh.advertise<geometry_msgs::PoseArray>("toe_positions", 1);
+    // pub_left_toe = nh.advertise<geometry_msgs::PointStamped>("left_toe", 1);
+    // pub_right_toe = nh.advertise<geometry_msgs::PointStamped>("right_toe", 1);
 
     if (PUBLISH_DEBUG) {
         pub_left_leg = nh.advertise<sensor_msgs::PointCloud2>("left_leg", 1);

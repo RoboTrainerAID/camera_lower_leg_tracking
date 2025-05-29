@@ -13,6 +13,7 @@
 #include <geometry_msgs/TransformStamped.h>
 #include <geometry_msgs/PointStamped.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/PoseArray.h>
 #include <std_msgs/Float64MultiArray.h>
 #include <visualization_msgs/Marker.h>
 #include <tf2_ros/transform_listener.h>

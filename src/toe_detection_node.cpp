@@ -219,7 +219,7 @@ void cloud_cb(const sensor_msgs::PointCloud2 &input_cloud) {
         // }
         if (!legs[0]->empty() && !legs[1]->empty()) {
             geometry_msgs::PoseArray toe_positions;
-            toe_positions.header.stamp = ros::Time::now();
+            toe_positions.header.stamp = input_cloud.header.stamp;
             toe_positions.header.frame_id = "base_link";
             toe_positions.header.seq++;
             toe_positions.poses.resize(2);

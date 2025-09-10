@@ -19,6 +19,7 @@ find_package(catkin REQUIRED COMPONENTS roscpp
     tf2_sensor_msgs
     tf2_eigen
     std_msgs
+    rosbag
     iirob_filters)
     
 find_package(PCL 1.7 REQUIRED)
@@ -154,11 +155,14 @@ include_directories(
 add_executable(feet_detection_node src/feet_detection_node.cpp)
 target_link_libraries(feet_detection_node ${catkin_LIBRARIES})
 
-add_executable(toe_detection_node src/toe_detection_node.cpp)
+add_executable(toe_detection_node src/toe_detection_node.cpp src/toe_detection.cpp)
 target_link_libraries(toe_detection_node ${catkin_LIBRARIES})
 
 add_executable(fix_foot_axis src/fix_foot_axis.cpp)
 target_link_libraries(fix_foot_axis ${catkin_LIBRARIES})
+
+add_executable(read_rosbag src/read_rosbag.cpp src/toe_detection.cpp)
+target_link_libraries(read_rosbag ${catkin_LIBRARIES})
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the

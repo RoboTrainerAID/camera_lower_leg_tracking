@@ -1,7 +1,7 @@
 #include "ros/ros.h"
 #include "../include/toe_detection.h"
 
-Cloud_ptr removeGround(const Cloud_ptr &input_pcl) {
+Cloud_ptr removeGround(const Cloud_ptr &input_pcl, double downsample_point_size, double min_z, double max_z, double min_y, double max_y, geometry_msgs::TransformStamped transform) {
     // ros::Time start = ros::Time::now();
 
     // Avoid copies by using shared pointers
@@ -13,14 +13,14 @@ Cloud_ptr removeGround(const Cloud_ptr &input_pcl) {
     // Downsampling
     pcl::VoxelGrid<Point> vg;
     vg.setInputCloud(input_pcl);
-    vg.setLeafSize(DONWSAMPLE_POINT_SIZE, DONWSAMPLE_POINT_SIZE, DONWSAMPLE_POINT_SIZE);
+    vg.setLeafSize(downsample_point_size, downsample_point_size, downsample_point_size);
     vg.filter(*downsampled_pcl);
 
     // ros::Time downsampling = ros::Time::now();
     // ROS_INFO("DOWNSAMPLING TOOK %f SECONDS", (downsampling - start).toSec());
 
     // Transform
-    pcl::transformPointCloud(*downsampled_pcl, *transformed_pcl, tf2::transformToEigen(transformStamped).matrix());
+    pcl::transformPointCloud(*downsampled_pcl, *transformed_pcl, tf2::transformToEigen(transform).matrix());
     transformed_pcl->header.frame_id = "base_link";
 
     // ros::Time transTime = ros::Time::now();
@@ -30,14 +30,14 @@ Cloud_ptr removeGround(const Cloud_ptr &input_pcl) {
     pcl::PassThrough<Point> pass;
     pass.setInputCloud(transformed_pcl);
     pass.setFilterFieldName("z");
-    pass.setFilterLimits(MIN_Z, MAX_Z);
+    pass.setFilterLimits(min_z, max_z);
     pass.filter(*filtered_z_pcl);
 
-    // Further filter by y-range
+    // Further filter by y using min_y and max_y.
     pcl::PassThrough<Point> pass_y;
     pass_y.setInputCloud(filtered_z_pcl);
     pass_y.setFilterFieldName("y");
-    pass_y.setFilterLimits(-0.4, 0.4);
+    pass_y.setFilterLimits(min_y, max_y);
     pass_y.filter(*filtered_y_pcl);
 
     // ros::Time passTime = ros::Time::now();
@@ -84,17 +84,17 @@ std::vector<Cloud_ptr> splitCluster(Cloud_ptr both_legs) {
         if (center.y >= 0) {
             ROS_INFO("ONLY LEFT LEG IN FRAME");
             legs.push_back(both_legs);
-            legs.push_back(boost::make_shared<Cloud>()); // Empty right leg
+            legs.push_back(boost::make_shared<Cloud>());
         } else {
             ROS_INFO("ONLY RIGHT LEG IN FRAME");
-            legs.push_back(boost::make_shared<Cloud>()); // Empty left leg
+            legs.push_back(boost::make_shared<Cloud>());
             legs.push_back(both_legs);
         }
     }
     return legs;
 }
 
-std::vector<Cloud_ptr> splitLegs(Cloud_ptr input_cloud_ptr) {
+std::vector<Cloud_ptr> splitLegs(Cloud_ptr input_cloud_ptr, double cluster_tolerance, int min_cluster_size) {
     std::vector<Cloud_ptr> legs;
     std::vector<Cloud_ptr> clusters;
 
@@ -108,8 +108,8 @@ std::vector<Cloud_ptr> splitLegs(Cloud_ptr input_cloud_ptr) {
     tree->setInputCloud(input_cloud_ptr);
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<Point> ec;
-    ec.setClusterTolerance(CLUSTER_TOLERANCE);
-    ec.setMinClusterSize(MIN_CLUSTER_SIZE);
+    ec.setClusterTolerance(cluster_tolerance);
+    ec.setMinClusterSize(min_cluster_size);
     ec.setSearchMethod(tree);
     ec.setInputCloud(input_cloud_ptr);
     ec.extract(cluster_indices);
@@ -135,7 +135,6 @@ std::vector<Cloud_ptr> splitLegs(Cloud_ptr input_cloud_ptr) {
 }
 
 geometry_msgs::Point findToe(Cloud_ptr input_cloud_ptr) {
-
     geometry_msgs::Point maxX;
     if (!input_cloud_ptr->empty()) {
         maxX.x = input_cloud_ptr->points[0].x;

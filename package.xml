@@ -21,6 +21,7 @@
   <depend>tf2_ros</depend>
   <depend>tf2_sensor_msgs</depend>
   <depend>tf2_eigen</depend>
+  <depend>rosbag</depend>
 
   <!-- The export tag contains other, unspecified, tags -->
   <export>

@@ -1,6 +1,5 @@
-#include "ros/ros.h"
+#include <ros/ros.h>
 #include "../include/toe_detection.h"
-
 
 double MIN_Z, MAX_Z, MIN_Y, MAX_Y, CLUSTER_TOLERANCE, DONWSAMPLE_POINT_SIZE;
 bool PUBLISH_DEBUG;
@@ -10,12 +9,10 @@ std::string INPUT_POINTCLOUD_TOPIC, CAMERA_DEPTH_FRAME_ID;
 geometry_msgs::TransformStamped transformStamped;
 ros::Publisher pub_left_leg, pub_right_leg, pub_left_toe, pub_right_toe, pub_debug, pub_toes;
 
-
-
-//With splitLegs a vector will be filled where the first entry is left and and the second is right.
-//If there is no Cluster then legs will stay empty.
-//If both legs are one cluster it will get split in the middle
-//If only one leg is in the frame its Cloud will be as expected. The other Cloud will be empty.
+// With splitLegs a vector will be filled where the first entry is left and and the second is right.
+// If there is no Cluster then legs will stay empty.
+// If both legs are one cluster it will get split in the middle
+// If only one leg is in the frame its Cloud will be as expected. The other Cloud will be empty.
 void cloud_cb(const sensor_msgs::PointCloud2 &input_cloud) {
     ros::Time start = ros::Time::now();
 
@@ -25,35 +22,19 @@ void cloud_cb(const sensor_msgs::PointCloud2 &input_cloud) {
 
     // ros::Time conTime = ros::Time::now();
     // ROS_INFO("Conversion TOOK %f SECONDS", (conTime - start).toSec());
-
-    Cloud_ptr removedGround = removeGround(input_pcl);
-
+    Cloud_ptr removedGround = removeGround(input_pcl, DONWSAMPLE_POINT_SIZE, MIN_Z, MAX_Z, MIN_Y, MAX_Y, transformStamped);
+    
     // ros::Time ground = ros::Time::now();
     // ROS_INFO("REMOVE GROUND TOOK %f SECONDS", (ground - conTime).toSec());
     if(PUBLISH_DEBUG) {
         pub_debug.publish(*removedGround);
     }
 
-    std::vector<Cloud_ptr> legs = splitLegs(removedGround);
-
+    std::vector<Cloud_ptr> legs = splitLegs(removedGround, CLUSTER_TOLERANCE, MIN_CLUSTER_SIZE);
     // ros::Time split = ros::Time::now();
     // ROS_INFO("SPLIT LEGS TOOK %f SECONDS", (split - ground).toSec());
-
+    
     if (legs.size() == 2) {
-        // if (!legs[0]->empty()) {
-        //     geometry_msgs::PointStamped left_toe = findToe(*legs[0]);
-        //     pub_left_toe.publish(left_toe);
-        //     if(PUBLISH_DEBUG) {
-        //         pub_left_leg.publish(*legs[0]);
-        //     }
-        // }
-        // if (!legs[1]->empty()) {
-        //     geometry_msgs::PointStamped right_toe = findToe(*legs[1]);
-        //     pub_right_toe.publish(right_toe);
-        //     if(PUBLISH_DEBUG) {
-        //         pub_right_leg.publish(*legs[1]);
-        //     }
-        // }
         if (!legs[0]->empty() && !legs[1]->empty()) {
             geometry_msgs::PoseArray toe_positions;
             toe_positions.header.stamp = input_cloud.header.stamp;

@@ -101,16 +101,31 @@ int main(int argc, char **argv) {
     rosbag::Bag outBag;
     outBag.open("/home/docker/ros_ws/data/toe_positions.bag", rosbag::bagmode::Write);
 
-    // time length of bag file vs. time length for processing -> real-time factor
-    // Add Kalman filter at the en for smoothing the toe positions.
+    ros::Time total_loop_start_time = ros::Time::now();
+    ros::Duration pure_processing_duration(0.0);
+    ros::Time first_msg_stamp, last_msg_stamp;
+    bool is_first_message = true;
+    int message_count = 0;
+    int written_message_count = 0;
+
     for (const rosbag::MessageInstance& m : pc_view) {
         sensor_msgs::PointCloud2::ConstPtr pc_msg = m.instantiate<sensor_msgs::PointCloud2>();
         if (pc_msg != nullptr) {
+            message_count++;
+            if (is_first_message) {
+                first_msg_stamp = pc_msg->header.stamp;
+                is_first_message = false;
+            }
+            last_msg_stamp = pc_msg->header.stamp;
+
+            ros::Time processing_start_time = ros::Time::now();
+
             Cloud_ptr input_pcl = boost::make_shared<Cloud>();
             pcl_df::fromROSMsg(*pc_msg, *input_pcl);
             // Call the updated functions with parameters.
             Cloud_ptr removedGround = removeGround(input_pcl, downsample_point_size, min_z, max_z, min_y, max_y, transformStamped);
             std::vector<Cloud_ptr> legs = splitLegs(removedGround, cluster_tolerance, min_cluster_size);
+            
             if (legs.size() == 2 && !legs[0]->empty() && !legs[1]->empty()) {
                 geometry_msgs::PoseArray toe_positions;
                 toe_positions.header.stamp = pc_msg->header.stamp;
@@ -118,11 +133,42 @@ int main(int argc, char **argv) {
                 toe_positions.poses.resize(2);
                 toe_positions.poses[0].position = findToe(legs[0]);
                 toe_positions.poses[1].position = findToe(legs[1]);
+                
+                pure_processing_duration += (ros::Time::now() - processing_start_time);
+                
                 outBag.write("toe_positions", pc_msg->header.stamp, toe_positions);
+                written_message_count++;
                 ROS_INFO("Wrote toe positions for timestamp %f", pc_msg->header.stamp.toSec());
             }
         }
     }
+
+    ros::Time total_loop_end_time = ros::Time::now();
+    ros::Duration total_loop_duration = total_loop_end_time - total_loop_start_time;
+    ros::Duration bag_duration = last_msg_stamp - first_msg_stamp;
+
+    double message_loss_percentage = 0.0;
+    if (message_count > 0) {
+        message_loss_percentage = (1.0 - static_cast<double>(written_message_count) / message_count) * 100.0;
+    }
+
+    ROS_INFO("================================================");
+    ROS_INFO("Bag Processing Performance Metrics:");
+    ROS_INFO("Total PCL messages read: %d", message_count);
+    ROS_INFO("Toe position messages written: %d", written_message_count);
+    ROS_INFO("Message loss: %.2f%%", message_loss_percentage);
+    ROS_INFO("Total loop time (read + process + write): %.4f s", total_loop_duration.toSec());
+    ROS_INFO("Pure PCL processing time: %.4f s", pure_processing_duration.toSec());
+    ROS_INFO("Bag duration (time between first/last msg): %.4f s", bag_duration.toSec());
+    if (bag_duration.toSec() > 0) {
+        double msgs_per_sec = message_count / bag_duration.toSec();
+        ROS_INFO("Messages per second (bag time): %.2f Hz", msgs_per_sec);
+    }
+    if (total_loop_duration.toSec() > 0) {
+        double real_time_factor = bag_duration.toSec() / total_loop_duration.toSec();
+        ROS_INFO("Real-time factor: %.2fx", real_time_factor);
+    }
+    ROS_INFO("================================================");
 
     outBag.close();
     bag.close();

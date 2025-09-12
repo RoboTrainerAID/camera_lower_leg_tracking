@@ -36,15 +36,28 @@
 #undef LZ4_decompress_safe_continue
 #undef LZ4_decompress_fast_continue
 
+#include <iirob_filters/kalman_filter.h>
+typedef iirob_filters::MultiChannelKalmanFilter<double> KalmanFilter;
+KalmanFilter* kf;
+
+void print_state(const std::string& label, const std::vector<double>& state) {
+    std::cout << label << ": [";
+    for (size_t i = 0; i < state.size(); ++i) {
+        std::cout << state[i] << (i == state.size() - 1 ? "" : ", ");
+    }
+    std::cout << "]" << std::endl;
+}
 
 int main(int argc, char **argv) {
     ros::init(argc, argv, "read_rosbag");
     ros::NodeHandle nh;
 
+    kf = new KalmanFilter();
+
     // Get parameters including filtering/clustering values.
     std::string bag_file_path;
     std::string camera_depth_frame_id = "camera_depth_frame";
-    double min_z, max_z, min_y, max_y, cluster_tolerance, downsample_point_size;
+    double min_z, max_z, min_y, max_y, cluster_tolerance, downsample_point_size, target_frequency;
     int min_cluster_size;
 
     ros::param::param<std::string>("~/bag_file_path", bag_file_path, "test.bag");
@@ -56,6 +69,7 @@ int main(int argc, char **argv) {
     ros::param::param<double>("~/cluster_tolerance", cluster_tolerance, 0.03);
     ros::param::param<double>("~/downsample_point_size", downsample_point_size, 0.01);
     ros::param::param<int>("~/min_cluster_size", min_cluster_size, 150);
+    ros::param::param<double>("~/target_frequency", target_frequency, 20.0); // Added target frequency parameter
 
     rosbag::Bag bag;
     try {
@@ -103,49 +117,140 @@ int main(int argc, char **argv) {
 
     ros::Time total_loop_start_time = ros::Time::now();
     ros::Duration pure_processing_duration(0.0);
-    ros::Time first_msg_stamp, last_msg_stamp;
+    ros::Time first_msg_stamp, last_real_stamp;
     bool is_first_message = true;
     int message_count = 0;
     int written_message_count = 0;
+    const ros::Duration target_period(1.0 / target_frequency);
 
     for (const rosbag::MessageInstance& m : pc_view) {
         sensor_msgs::PointCloud2::ConstPtr pc_msg = m.instantiate<sensor_msgs::PointCloud2>();
-        if (pc_msg != nullptr) {
-            message_count++;
-            if (is_first_message) {
-                first_msg_stamp = pc_msg->header.stamp;
-                is_first_message = false;
-            }
-            last_msg_stamp = pc_msg->header.stamp;
+        if (pc_msg == nullptr) continue;
 
-            ros::Time processing_start_time = ros::Time::now();
+        message_count++;
+        ros::Time current_msg_stamp = pc_msg->header.stamp;
 
-            Cloud_ptr input_pcl = boost::make_shared<Cloud>();
-            pcl_df::fromROSMsg(*pc_msg, *input_pcl);
-            // Call the updated functions with parameters.
-            Cloud_ptr removedGround = removeGround(input_pcl, downsample_point_size, min_z, max_z, min_y, max_y, transformStamped);
-            std::vector<Cloud_ptr> legs = splitLegs(removedGround, cluster_tolerance, min_cluster_size);
+        if (is_first_message) {
+            first_msg_stamp = current_msg_stamp;
             
-            if (legs.size() == 2 && !legs[0]->empty() && !legs[1]->empty()) {
-                geometry_msgs::PoseArray toe_positions;
-                toe_positions.header.stamp = pc_msg->header.stamp;
-                toe_positions.header.frame_id = "base_link";
-                toe_positions.poses.resize(2);
-                toe_positions.poses[0].position = findToe(legs[0]);
-                toe_positions.poses[1].position = findToe(legs[1]);
-                
-                pure_processing_duration += (ros::Time::now() - processing_start_time);
-                
-                outBag.write("toe_positions", pc_msg->header.stamp, toe_positions);
-                written_message_count++;
-                ROS_INFO("Wrote toe positions for timestamp %f", pc_msg->header.stamp.toSec());
+            is_first_message = false;
+        }
+
+        // --- Main Processing ---
+        ros::Time processing_start_time = ros::Time::now();
+        Cloud_ptr input_pcl = boost::make_shared<Cloud>();
+        pcl_df::fromROSMsg(*pc_msg, *input_pcl);
+        Cloud_ptr removedGround = removeGround(input_pcl, downsample_point_size, min_z, max_z, min_y, max_y, transformStamped);
+        std::vector<Cloud_ptr> legs = splitLegs(removedGround, cluster_tolerance, min_cluster_size);
+        pure_processing_duration += (ros::Time::now() - processing_start_time);
+
+        geometry_msgs::Point left_toe, right_toe;
+
+        // Left leg is always [0], right leg [1]
+        if (legs.size() != 2) {
+            ROS_WARN("Vector length not as expected, size is: %zu. Skipping this message.", legs.size());
+            continue;
+        }
+        if (!legs[0]->empty()) {
+            left_toe = findToe(legs[0]);
+        }
+        if (!legs[1]->empty()) {
+            right_toe = findToe(legs[1]);
+        }
+
+        if(left_toe.x != 0.0 && left_toe.y != 0.0 && left_toe.z != 0.0) {
+            // Valid left toe detected
+            // --- Prediction and Update Logic ---
+            if (kf->isInitializated()) {
+                // 1. Predict to fill the gap from previous msg if necessary
+                ros::Duration time_gap = current_msg_stamp - last_real_stamp;
+                if ((time_gap > target_period)) {
+
+                    int num_predictions_needed = static_cast<int>(time_gap.toSec() / target_period.toSec());
+
+                    // Limit the number of predictions to a maximum of 5
+                    if (num_predictions_needed > 5) {
+                        ROS_WARN("Large time gap detected (%.2f s), but limiting predictions to 5.", time_gap.toSec());
+                        num_predictions_needed = 5;
+                    }
+
+                    for (int i = 0; i < num_predictions_needed; ++i) {
+                        std::vector<double> predicted_state;
+                        
+                        // This does NOT advance the filter's internal state
+                        // It just computes what the state would be after the given time interval
+                        kf->computePrediction(predicted_state, target_period.toSec() * (i + 1));
+
+                        geometry_msgs::PoseArray predicted_toes;
+                        ros::Time predicted_stamp = last_real_stamp + target_period * (i+1);
+                        predicted_toes.header.stamp = predicted_stamp;
+                        predicted_toes.header.frame_id = "base_link";
+                        predicted_toes.poses.resize(1); // Only one predicted pose
+                        predicted_toes.poses[0].position.x = predicted_state[0];
+                        predicted_toes.poses[0].position.y = predicted_state[1];
+                        predicted_toes.poses[0].position.z = predicted_state[2];
+
+                        ROS_INFO("Predicted toe position at t+%.2f s: [%.3f, %.3f, %.3f]", (predicted_stamp - last_real_stamp).toSec(), predicted_state[0], predicted_state[1], predicted_state[2]);
+                        
+                        outBag.write("toe_positions_kalman", predicted_stamp, predicted_toes);
+                    }
+                }
             }
+
+            // 2. Update the filter with the new real measurement
+            std::vector<double> measurement = {left_toe.x, left_toe.y, left_toe.z};
+            std::vector<double> corrected_state;
+
+            if (!kf->isInitializated()) {
+                // Initialize the filter state with the first measurement
+                std::vector<double> initial_state = {left_toe.x, left_toe.y, left_toe.z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+                if (kf->configure(initial_state, "KalmanFilter")) {
+                    ROS_INFO("Kalman Filter initialized with first measurement.");
+                } else {
+                    ROS_ERROR("Failed to initialize Kalman Filter with first measurement.");
+                    return -1;
+                }
+            }
+            else {
+            
+                double sensor_dt = (current_msg_stamp - last_real_stamp).toSec();
+
+                if (sensor_dt <= 0.0) {
+                    ROS_WARN("Sensor dt is non-positive (%.3f s). Setting to 0.1 s to avoid issues.", sensor_dt);
+                    sensor_dt = 0.1;
+                }
+
+                if (kf->update(measurement, corrected_state, sensor_dt, true)) {
+                    geometry_msgs::PoseArray corrected_toes;
+                    corrected_toes.header.stamp = current_msg_stamp;
+                    corrected_toes.header.frame_id = "base_link";
+                    corrected_toes.poses.resize(1);
+                    corrected_toes.poses[0].position.x = corrected_state[0];
+                    corrected_toes.poses[0].position.y = corrected_state[1];
+                    corrected_toes.poses[0].position.z = corrected_state[2];
+
+                    outBag.write("toe_positions_kalman", current_msg_stamp, corrected_toes);
+                } else {
+                    ROS_WARN("Kalman Filter update failed");
+                }
+
+
+                geometry_msgs::PoseArray measured_toes;
+                measured_toes.header.stamp = current_msg_stamp;
+                measured_toes.header.frame_id = "base_link";
+                measured_toes.poses.resize(1);
+                measured_toes.poses[0].position = left_toe;
+                outBag.write("toe_positions", current_msg_stamp, measured_toes);
+
+                written_message_count++;
+            }
+            last_real_stamp = current_msg_stamp;
         }
     }
 
     ros::Time total_loop_end_time = ros::Time::now();
     ros::Duration total_loop_duration = total_loop_end_time - total_loop_start_time;
-    ros::Duration bag_duration = last_msg_stamp - first_msg_stamp;
+    ros::Duration bag_duration = last_real_stamp - first_msg_stamp;
 
     double message_loss_percentage = 0.0;
     if (message_count > 0) {

@@ -57,7 +57,7 @@ int main(int argc, char **argv) {
     // Get parameters including filtering/clustering values.
     std::string bag_file_path;
     std::string camera_depth_frame_id = "camera_depth_frame";
-    double min_z, max_z, min_y, max_y, cluster_tolerance, downsample_point_size, target_frequency;
+    double min_z, max_z, min_y, max_y, cluster_tolerance, downsample_point_size, target_frequency, max_prediction_time;
     int min_cluster_size;
 
     ros::param::param<std::string>("~/bag_file_path", bag_file_path, "test.bag");
@@ -70,6 +70,7 @@ int main(int argc, char **argv) {
     ros::param::param<double>("~/downsample_point_size", downsample_point_size, 0.01);
     ros::param::param<int>("~/min_cluster_size", min_cluster_size, 150);
     ros::param::param<double>("~/target_frequency", target_frequency, 20.0); // Added target frequency parameter
+    ros::param::param<double>("~/max_prediction_time", max_prediction_time, 0.25); // Max time to predict into the future
 
     rosbag::Bag bag;
     try {
@@ -116,7 +117,7 @@ int main(int argc, char **argv) {
     outBag.open("/home/docker/ros_ws/data/toe_positions.bag", rosbag::bagmode::Write);
 
     ros::Time total_loop_start_time = ros::Time::now();
-    ros::Duration pure_processing_duration(0.0);
+    ros::Duration pure_processing_duration(0.0), pure_kalman_duration(0.0);
     ros::Time first_msg_stamp, last_real_stamp;
     bool is_first_message = true;
     int message_count = 0;
@@ -142,10 +143,8 @@ int main(int argc, char **argv) {
         pcl_df::fromROSMsg(*pc_msg, *input_pcl);
         Cloud_ptr removedGround = removeGround(input_pcl, downsample_point_size, min_z, max_z, min_y, max_y, transformStamped);
         std::vector<Cloud_ptr> legs = splitLegs(removedGround, cluster_tolerance, min_cluster_size);
-        pure_processing_duration += (ros::Time::now() - processing_start_time);
-
         geometry_msgs::Point left_toe, right_toe;
-
+        
         // Left leg is always [0], right leg [1]
         if (legs.size() != 2) {
             ROS_WARN("Vector length not as expected, size is: %zu. Skipping this message.", legs.size());
@@ -158,6 +157,9 @@ int main(int argc, char **argv) {
             right_toe = findToe(legs[1]);
         }
 
+        pure_processing_duration += (ros::Time::now() - processing_start_time);
+        ros::Time kalman_start_time = ros::Time::now();
+        
         if(left_toe.x != 0.0 && left_toe.y != 0.0 && left_toe.z != 0.0) {
             // Valid left toe detected
             // --- Prediction and Update Logic ---
@@ -166,13 +168,14 @@ int main(int argc, char **argv) {
                 ros::Duration time_gap = current_msg_stamp - last_real_stamp;
                 if ((time_gap > target_period)) {
 
-                    int num_predictions_needed = static_cast<int>(time_gap.toSec() / target_period.toSec());
-
-                    // Limit the number of predictions to a maximum of 5
-                    if (num_predictions_needed > 5) {
-                        ROS_WARN("Large time gap detected (%.2f s), but limiting predictions to 5.", time_gap.toSec());
-                        num_predictions_needed = 5;
+                    ros::Duration prediction_gap = time_gap;
+                    // Limit the prediction time to the configured maximum
+                    if (time_gap.toSec() > max_prediction_time) {
+                        ROS_WARN("Large time gap detected (%.2f s), limiting prediction time to %.2f s.", time_gap.toSec(), max_prediction_time);
+                        prediction_gap = ros::Duration(max_prediction_time);
                     }
+
+                    int num_predictions_needed = static_cast<int>(prediction_gap.toSec() / target_period.toSec());
 
                     for (int i = 0; i < num_predictions_needed; ++i) {
                         std::vector<double> predicted_state;
@@ -181,14 +184,28 @@ int main(int argc, char **argv) {
                         // It just computes what the state would be after the given time interval
                         kf->computePrediction(predicted_state, target_period.toSec() * (i + 1));
 
+                        pure_kalman_duration += (ros::Time::now() - kalman_start_time);
+
                         geometry_msgs::PoseArray predicted_toes;
-                        ros::Time predicted_stamp = last_real_stamp + target_period * (i+1);
+                        ros::Time predicted_stamp = last_real_stamp + target_period * (i + 1);
                         predicted_toes.header.stamp = predicted_stamp;
                         predicted_toes.header.frame_id = "base_link";
                         predicted_toes.poses.resize(1); // Only one predicted pose
                         predicted_toes.poses[0].position.x = predicted_state[0];
                         predicted_toes.poses[0].position.y = predicted_state[1];
                         predicted_toes.poses[0].position.z = predicted_state[2];
+
+                        // geometry_msgs::Point vel;
+                        // vel.x = predicted_state[3];
+                        // vel.y = predicted_state[4];
+                        // vel.z = predicted_state[5];
+                        // geometry_msgs::Point acc;
+                        // acc.x = predicted_state[6];
+                        // acc.y = predicted_state[7];
+                        // acc.z = predicted_state[8];
+
+                        // outBag.write("toe_velocities", predicted_stamp, vel);
+                        // outBag.write("toe_accelerations", predicted_stamp, acc);
 
                         ROS_INFO("Predicted toe position at t+%.2f s: [%.3f, %.3f, %.3f]", (predicted_stamp - last_real_stamp).toSec(), predicted_state[0], predicted_state[1], predicted_state[2]);
                         
@@ -206,6 +223,7 @@ int main(int argc, char **argv) {
                 std::vector<double> initial_state = {left_toe.x, left_toe.y, left_toe.z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
                 if (kf->configure(initial_state, "KalmanFilter")) {
                     ROS_INFO("Kalman Filter initialized with first measurement.");
+                    pure_kalman_duration += (ros::Time::now() - kalman_start_time);
                 } else {
                     ROS_ERROR("Failed to initialize Kalman Filter with first measurement.");
                     return -1;
@@ -221,6 +239,7 @@ int main(int argc, char **argv) {
                 }
 
                 if (kf->update(measurement, corrected_state, sensor_dt, true)) {
+                    pure_kalman_duration += (ros::Time::now() - kalman_start_time);
                     geometry_msgs::PoseArray corrected_toes;
                     corrected_toes.header.stamp = current_msg_stamp;
                     corrected_toes.header.frame_id = "base_link";
@@ -228,6 +247,18 @@ int main(int argc, char **argv) {
                     corrected_toes.poses[0].position.x = corrected_state[0];
                     corrected_toes.poses[0].position.y = corrected_state[1];
                     corrected_toes.poses[0].position.z = corrected_state[2];
+
+                    // geometry_msgs::Point vel;
+                    // vel.x = corrected_state[3];
+                    // vel.y = corrected_state[4];
+                    // vel.z = corrected_state[5];
+                    // geometry_msgs::Point acc;
+                    // acc.x = corrected_state[6];
+                    // acc.y = corrected_state[7];
+                    // acc.z = corrected_state[8];
+
+                    // outBag.write("toe_velocities", current_msg_stamp, vel);
+                    // outBag.write("toe_accelerations", current_msg_stamp, acc);
 
                     outBag.write("toe_positions_kalman", current_msg_stamp, corrected_toes);
                 } else {
@@ -264,6 +295,7 @@ int main(int argc, char **argv) {
     ROS_INFO("Message loss: %.2f%%", message_loss_percentage);
     ROS_INFO("Total loop time (read + process + write): %.4f s", total_loop_duration.toSec());
     ROS_INFO("Pure PCL processing time: %.4f s", pure_processing_duration.toSec());
+    ROS_INFO("Pure Kalman filter time: %.4f s", pure_kalman_duration.toSec());
     ROS_INFO("Bag duration (time between first/last msg): %.4f s", bag_duration.toSec());
     if (bag_duration.toSec() > 0) {
         double msgs_per_sec = message_count / bag_duration.toSec();

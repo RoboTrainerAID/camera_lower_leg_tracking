@@ -30,6 +30,15 @@ KalmanFilter:
   
   # --- State Transition Model (F = A + At(dt)) ---
   # Zustandsübergangsmatrix F
+  # Example for x dimension:
+  # x_new = F * x_old
+  # F = A + At(Δt)
+  # For position: At[0][3] = 1 and At[0][6] = 2
+  # px(k)=px(k−1)+Δt⋅vx(k−1)+ 1/2Δt^2⋅ax(k−1)
+  # For velocity: At[3][6] = 1
+  # vx(k)=vx(k−1)+Δt⋅ax(k−1)
+  # For acceleration: no change
+  # ax(k)=ax(k−1)
   # Static part of F (Identity)
   A: [1, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 1, 0, 0, 0, 0, 0, 0, 0,
@@ -99,14 +108,18 @@ KalmanFilter:
                0, 0, 2, 0, 0, 1, 0, 0, 1]
       
   # MAIN TUNING PARAMETER for how much you trust your motion model
-  Q_variance: 1.0
+  # Tuning guideline: Q_variance/R ~= 10 
+  Q_variance: 0.1
 
   # --- Measurement Noise Covariance (R) ---
   # Messrauschen
+  # R(0,0)= σx^2 Variance of the measurement error in the x-direction
+  # Example Realsense has accuracy of ±2mm -> σx=0.002m -> R(0,0)=0.000004
+  # But PCL processing to find the toe position has much higher error -> σx=0.1m -> R(0,0)=0.01
   # m x m (3x3) - Depends on sensor accuracy
-  R: [0.1, 0,     0,
-      0,     0.1, 0,
-      0,     0,     0.1]
+  R: [0.01, 0,     0, # rx: Low noise for px (high trust)
+      0,     0.01, 0, # ry: Low noise for py (high trust)
+      0,     0,     100.0] # rz: HIGH noise for pz (LOW trust)
   
   # --- Initial Conditions ---
   # Fehlerkovarianz

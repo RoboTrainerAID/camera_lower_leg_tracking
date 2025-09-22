@@ -161,7 +161,7 @@ target_link_libraries(toe_detection_node ${catkin_LIBRARIES})
 add_executable(fix_foot_axis src/fix_foot_axis.cpp)
 target_link_libraries(fix_foot_axis ${catkin_LIBRARIES})
 
-add_executable(read_rosbag src/read_rosbag.cpp src/toe_detection.cpp)
+add_executable(read_rosbag src/read_rosbag.cpp src/toe_detection.cpp src/frequency_locked_kalman_filter.cpp)
 target_link_libraries(read_rosbag ${catkin_LIBRARIES})
 
 ## Rename C++ executable without prefix

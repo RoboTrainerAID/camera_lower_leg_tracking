@@ -1,5 +1,6 @@
 #include <ros/ros.h>
 #include "../include/toe_detection.h"
+#include "../include/frequency_locked_kalman_filter.h"
 
 // The following block is a workaround for the fact that rosbag includes lz4.h which defines symbols that conflict with pcl's use of lz4.
 // See https://github.com/ethz-asl/lidar_align/issues/16#issuecomment-504348488
@@ -20,6 +21,9 @@
 #define LZ4_decompress_fast_continue LZ4_decompress_fast_continue_deprecated
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
+#include <std_msgs/Float64.h>
+#include <deque>
+#include <numeric>
 #undef LZ4_stream_t
 #undef LZ4_resetStream
 #undef LZ4_createStream
@@ -36,9 +40,29 @@
 #undef LZ4_decompress_safe_continue
 #undef LZ4_decompress_fast_continue
 
-#include <iirob_filters/kalman_filter.h>
-typedef iirob_filters::MultiChannelKalmanFilter<double> KalmanFilter;
-KalmanFilter* kf;
+
+// Helper function to calculate 2D Euclidean distance between two points
+double pointDistance2D(const geometry_msgs::Point& p1, const geometry_msgs::Point& p2) {
+    return std::sqrt(std::pow(p1.x - p2.x, 2) + std::pow(p1.y - p2.y, 2));
+}
+
+// Helper function to calculate the average of a deque of points
+geometry_msgs::Point getAveragePoint(const std::deque<geometry_msgs::Point>& points) {
+    geometry_msgs::Point avg;
+    avg.x = 0; avg.y = 0; avg.z = 0;
+    if (points.empty()) {
+        return avg;
+    }
+    for (const auto& p : points) {
+        avg.x += p.x;
+        avg.y += p.y;
+        avg.z += p.z;
+    }
+    avg.x /= points.size();
+    avg.y /= points.size();
+    avg.z /= points.size();
+    return avg;
+}
 
 void print_state(const std::string& label, const std::vector<double>& state) {
     std::cout << label << ": [";
@@ -52,12 +76,10 @@ int main(int argc, char **argv) {
     ros::init(argc, argv, "read_rosbag");
     ros::NodeHandle nh;
 
-    kf = new KalmanFilter();
-
     // Get parameters including filtering/clustering values.
     std::string bag_file_path;
     std::string camera_depth_frame_id = "camera_depth_frame";
-    double min_z, max_z, min_y, max_y, cluster_tolerance, downsample_point_size, target_frequency, max_prediction_time;
+    double min_z, max_z, min_y, max_y, cluster_tolerance, downsample_point_size, target_frequency, max_prediction_time, likelihood_threshold, swap_distance_threshold_ratio;
     int min_cluster_size;
 
     ros::param::param<std::string>("~/bag_file_path", bag_file_path, "test.bag");
@@ -69,8 +91,14 @@ int main(int argc, char **argv) {
     ros::param::param<double>("~/cluster_tolerance", cluster_tolerance, 0.03);
     ros::param::param<double>("~/downsample_point_size", downsample_point_size, 0.01);
     ros::param::param<int>("~/min_cluster_size", min_cluster_size, 150);
-    ros::param::param<double>("~/target_frequency", target_frequency, 20.0); // Added target frequency parameter
+    ros::param::param<double>("~/target_frequency", target_frequency, 20.0);
     ros::param::param<double>("~/max_prediction_time", max_prediction_time, 0.25); // Max time to predict into the future
+    ros::param::param<double>("~/likelihood_threshold", likelihood_threshold, 0.6); // Likelihood for outlier rejection
+    ros::param::param<double>("~/swap_distance_threshold_ratio", swap_distance_threshold_ratio, 0.5); // Ratio for distance-based swapping
+
+    // Instantiate two Kalman Filter wrappers, one for each toe
+    FrequencyLockedKalmanFilter kf_left_wrapper("KalmanFilter", target_frequency, max_prediction_time, likelihood_threshold);
+    FrequencyLockedKalmanFilter kf_right_wrapper("KalmanFilter", target_frequency, max_prediction_time, likelihood_threshold);
 
     rosbag::Bag bag;
     try {
@@ -122,7 +150,11 @@ int main(int argc, char **argv) {
     bool is_first_message = true;
     int message_count = 0;
     int written_message_count = 0;
-    const ros::Duration target_period(1.0 / target_frequency);
+    int consecutive_swappings = 0;
+
+    std::deque<geometry_msgs::Point> left_history;
+    std::deque<geometry_msgs::Point> right_history;
+    const size_t history_size = 3;
 
     for (const rosbag::MessageInstance& m : pc_view) {
         sensor_msgs::PointCloud2::ConstPtr pc_msg = m.instantiate<sensor_msgs::PointCloud2>();
@@ -133,7 +165,7 @@ int main(int argc, char **argv) {
 
         if (is_first_message) {
             first_msg_stamp = current_msg_stamp;
-            
+            last_real_stamp = current_msg_stamp;
             is_first_message = false;
         }
 
@@ -143,138 +175,185 @@ int main(int argc, char **argv) {
         pcl_df::fromROSMsg(*pc_msg, *input_pcl);
         Cloud_ptr removedGround = removeGround(input_pcl, downsample_point_size, min_z, max_z, min_y, max_y, transformStamped);
         std::vector<Cloud_ptr> legs = splitLegs(removedGround, cluster_tolerance, min_cluster_size);
-        geometry_msgs::Point left_toe, right_toe;
+        geometry_msgs::Point left_toe, right_toe, detected_left_toe, detected_right_toe;
         
-        // Left leg is always [0], right leg [1]
         if (legs.size() != 2) {
             ROS_WARN("Vector length not as expected, size is: %zu. Skipping this message.", legs.size());
             continue;
         }
         if (!legs[0]->empty()) {
-            left_toe = findToe(legs[0]);
+            detected_left_toe = findToe(legs[0]);
+            left_toe = detected_left_toe;
         }
         if (!legs[1]->empty()) {
-            right_toe = findToe(legs[1]);
+            detected_right_toe = findToe(legs[1]);
+            right_toe = detected_right_toe;
+        }
+        pure_processing_duration += (ros::Time::now() - processing_start_time);
+        
+        // --- Swapping logic based on distance to rolling average or Likelihood ---
+        bool grace_period_is_over = (current_msg_stamp - first_msg_stamp) > ros::Duration(10 * max_prediction_time);
+        bool max_consecutive_swappings_reached = (consecutive_swappings >= 100);
+            
+        if (grace_period_is_over && !max_consecutive_swappings_reached) {
+            // Only perform swapping after an initial period to allow filters to stabilize
+            bool left_valid = (left_toe.x != 0.0 || left_toe.y != 0.0 || left_toe.z != 0.0);
+            bool right_valid = (right_toe.x != 0.0 || right_toe.y != 0.0 || right_toe.z != 0.0);
+
+            if (left_valid && right_valid && !left_history.empty() && !right_history.empty()) {
+                // kf_left_wrapper.isInitialized() && kf_right_wrapper.isInitialized()) {
+                // std::vector<double> left_meas = {left_toe.x, left_toe.y};
+                // std::vector<double> right_meas = {right_toe.x, right_toe.y};
+
+                // double ll = kf_left_wrapper.getLikelihood(left_meas);
+                // double rr = kf_right_wrapper.getLikelihood(right_meas);
+                // double lr = kf_left_wrapper.getLikelihood(right_meas);
+                // double rl = kf_right_wrapper.getLikelihood(left_meas);
+
+                // // Write likelihoods to bag
+                // std_msgs::Float64 ll_msg, rr_msg, lr_msg, rl_msg;
+                // ll_msg.data = ll;
+                // rr_msg.data = rr;
+                // lr_msg.data = lr;
+                // rl_msg.data = rl;
+                // outBag.write("likelihood/left_kf_left_toe", current_msg_stamp, ll_msg);
+                // outBag.write("likelihood/right_kf_right_toe", current_msg_stamp, rr_msg);
+                // outBag.write("likelihood/left_kf_right_toe", current_msg_stamp, lr_msg);
+                // outBag.write("likelihood/right_kf_left_toe", current_msg_stamp, rl_msg);
+
+                // // If the swapped configuration has a higher combined likelihood, swap the toes.
+                // bool swap_condition = (lr + rl) > (ll + rr);
+
+                // Swapping based on distance to previous measurements
+                geometry_msgs::Point avg_left = getAveragePoint(left_history);
+                geometry_msgs::Point avg_right = getAveragePoint(right_history);
+
+                // Calculate sum of distances for non-swapped and swapped scenarios
+                double dist_not_swapped = pointDistance2D(left_toe, avg_left) + pointDistance2D(right_toe, avg_right);
+                double dist_swapped = pointDistance2D(left_toe, avg_right) + pointDistance2D(right_toe, avg_left);
+
+                // Write distances to bag
+                std_msgs::Float64 dist_swapped_msg, dist_not_swapped_msg;
+                dist_swapped_msg.data = dist_swapped;
+                dist_not_swapped_msg.data = dist_not_swapped;
+                outBag.write("distance/swapped", current_msg_stamp, dist_swapped_msg);
+                outBag.write("distance/not_swapped", current_msg_stamp, dist_not_swapped_msg);
+
+                // Swap if the swapped distance is significantly smaller (e.g., less than ratio * non-swapped)
+                bool swap_condition = (dist_swapped < swap_distance_threshold_ratio * dist_not_swapped);
+
+                if (swap_condition) {
+                    ROS_INFO("Swapping detected legs based on average distance.");
+                    std::swap(left_toe, right_toe);
+                    
+                    consecutive_swappings++;
+                } else {
+                    // No swap was needed, so reset the consecutive counter.
+                    consecutive_swappings = 0;
+                }
+            } else {
+                // Legs are not valid or filters not ready, reset counter.
+                consecutive_swappings = 0;
+            }
+        } else if (max_consecutive_swappings_reached) {
+            // Prevent to keep stuck in a swapping state
+            consecutive_swappings = 0;
         }
 
-        pure_processing_duration += (ros::Time::now() - processing_start_time);
-        ros::Time kalman_start_time = ros::Time::now();
-        
-        if(left_toe.x != 0.0 && left_toe.y != 0.0 && left_toe.z != 0.0) {
-            // Valid left toe detected
-            // --- Prediction and Update Logic ---
-            if (kf->isInitializated()) {
-                // 1. Predict to fill the gap from previous msg if necessary
-                ros::Duration time_gap = current_msg_stamp - last_real_stamp;
-                if ((time_gap > target_period)) {
-
-                    ros::Duration prediction_gap = time_gap;
-                    // Limit the prediction time to the configured maximum
-                    if (time_gap.toSec() > max_prediction_time) {
-                        ROS_WARN("Large time gap detected (%.2f s), limiting prediction time to %.2f s.", time_gap.toSec(), max_prediction_time);
-                        prediction_gap = ros::Duration(max_prediction_time);
-                    }
-
-                    int num_predictions_needed = static_cast<int>(prediction_gap.toSec() / target_period.toSec());
-
-                    for (int i = 0; i < num_predictions_needed; ++i) {
-                        std::vector<double> predicted_state;
-                        
-                        // This does NOT advance the filter's internal state
-                        // It just computes what the state would be after the given time interval
-                        kf->computePrediction(predicted_state, target_period.toSec() * (i + 1));
-
-                        pure_kalman_duration += (ros::Time::now() - kalman_start_time);
-
-                        geometry_msgs::PoseArray predicted_toes;
-                        ros::Time predicted_stamp = last_real_stamp + target_period * (i + 1);
-                        predicted_toes.header.stamp = predicted_stamp;
-                        predicted_toes.header.frame_id = "base_link";
-                        predicted_toes.poses.resize(1); // Only one predicted pose
-                        predicted_toes.poses[0].position.x = predicted_state[0];
-                        predicted_toes.poses[0].position.y = predicted_state[1];
-                        predicted_toes.poses[0].position.z = predicted_state[2];
-
-                        // geometry_msgs::Point vel;
-                        // vel.x = predicted_state[3];
-                        // vel.y = predicted_state[4];
-                        // vel.z = predicted_state[5];
-                        // geometry_msgs::Point acc;
-                        // acc.x = predicted_state[6];
-                        // acc.y = predicted_state[7];
-                        // acc.z = predicted_state[8];
-
-                        // outBag.write("toe_velocities", predicted_stamp, vel);
-                        // outBag.write("toe_accelerations", predicted_stamp, acc);
-
-                        ROS_INFO("Predicted toe position at t+%.2f s: [%.3f, %.3f, %.3f]", (predicted_stamp - last_real_stamp).toSec(), predicted_state[0], predicted_state[1], predicted_state[2]);
-                        
-                        outBag.write("toe_positions_kalman", predicted_stamp, predicted_toes);
-                    }
-                }
+        // Update history with current (potentially swapped) measurements
+        if (left_toe.x != 0.0 || left_toe.y != 0.0 || left_toe.z != 0.0) {
+            left_history.push_back(left_toe);
+            if (left_history.size() > history_size) {
+                left_history.pop_front();
             }
-
-            // 2. Update the filter with the new real measurement
-            std::vector<double> measurement = {left_toe.x, left_toe.y, left_toe.z};
-            std::vector<double> corrected_state;
-
-            if (!kf->isInitializated()) {
-                // Initialize the filter state with the first measurement
-                std::vector<double> initial_state = {left_toe.x, left_toe.y, left_toe.z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-                if (kf->configure(initial_state, "KalmanFilter")) {
-                    ROS_INFO("Kalman Filter initialized with first measurement.");
-                    pure_kalman_duration += (ros::Time::now() - kalman_start_time);
-                } else {
-                    ROS_ERROR("Failed to initialize Kalman Filter with first measurement.");
-                    return -1;
-                }
+        }
+        if (right_toe.x != 0.0 || right_toe.y != 0.0 || right_toe.z != 0.0) {
+            right_history.push_back(right_toe);
+            if (right_history.size() > history_size) {
+                right_history.pop_front();
             }
-            else {
+        }
+
+        bool any_toe_detected = false;
+
+        // --- Process Left Toe ---
+        if(left_toe.x != 0.0 || left_toe.y != 0.0 || left_toe.z != 0.0) {
+            any_toe_detected = true;
+            ros::Time kalman_start_time = ros::Time::now();
+
+            // Create 2D measurement vector [px, py]
+            std::vector<double> measurement = {left_toe.x, left_toe.y};
             
-                double sensor_dt = (current_msg_stamp - last_real_stamp).toSec();
+            // Call the wrapper to get corrected and predicted states
+            std::vector<KalmanState> states = kf_left_wrapper.update_and_predict_frequency_gap(measurement, current_msg_stamp);
 
-                if (sensor_dt <= 0.0) {
-                    ROS_WARN("Sensor dt is non-positive (%.3f s). Setting to 0.1 s to avoid issues.", sensor_dt);
-                    sensor_dt = 0.1;
-                }
+            pure_kalman_duration += (ros::Time::now() - kalman_start_time);
 
-                if (kf->update(measurement, corrected_state, sensor_dt, true)) {
-                    pure_kalman_duration += (ros::Time::now() - kalman_start_time);
-                    geometry_msgs::PoseArray corrected_toes;
-                    corrected_toes.header.stamp = current_msg_stamp;
-                    corrected_toes.header.frame_id = "base_link";
-                    corrected_toes.poses.resize(1);
-                    corrected_toes.poses[0].position.x = corrected_state[0];
-                    corrected_toes.poses[0].position.y = corrected_state[1];
-                    corrected_toes.poses[0].position.z = corrected_state[2];
+            // Iterate through all returned states and write them to the bag
+            for (const auto& state_pair : states) {
+                ros::Time stamp = state_pair.first;
+                const std::vector<double>& state = state_pair.second;
 
-                    // geometry_msgs::Point vel;
-                    // vel.x = corrected_state[3];
-                    // vel.y = corrected_state[4];
-                    // vel.z = corrected_state[5];
-                    // geometry_msgs::Point acc;
-                    // acc.x = corrected_state[6];
-                    // acc.y = corrected_state[7];
-                    // acc.z = corrected_state[8];
-
-                    // outBag.write("toe_velocities", current_msg_stamp, vel);
-                    // outBag.write("toe_accelerations", current_msg_stamp, acc);
-
-                    outBag.write("toe_positions_kalman", current_msg_stamp, corrected_toes);
-                } else {
-                    ROS_WARN("Kalman Filter update failed");
-                }
-
-
-                geometry_msgs::PoseArray measured_toes;
-                measured_toes.header.stamp = current_msg_stamp;
-                measured_toes.header.frame_id = "base_link";
-                measured_toes.poses.resize(1);
-                measured_toes.poses[0].position = left_toe;
-                outBag.write("toe_positions", current_msg_stamp, measured_toes);
-
-                written_message_count++;
+                // Create and write the PointStamped message
+                geometry_msgs::PointStamped toes_msg;
+                toes_msg.header.stamp = stamp;
+                toes_msg.header.frame_id = "base_link";
+                toes_msg.point.x = state[0];
+                toes_msg.point.y = state[1];
+                toes_msg.point.z = 0.0; // Z is not in the state
+                outBag.write("left_toe_position_kalman", stamp, toes_msg);
             }
+
+            // Also write the raw measurement for comparison
+            geometry_msgs::PointStamped measured_toes;
+            measured_toes.header.stamp = current_msg_stamp;
+            measured_toes.header.frame_id = "base_link";
+            measured_toes.point = detected_left_toe;
+            outBag.write("left_toe_position", current_msg_stamp, measured_toes);
+            measured_toes.point = left_toe;
+            outBag.write("left_toe_position_swaped", current_msg_stamp, measured_toes);
+        }
+
+        // --- Process Right Toe ---
+        if(right_toe.x != 0.0 || right_toe.y != 0.0 || right_toe.z != 0.0) {
+            any_toe_detected = true;
+            ros::Time kalman_start_time = ros::Time::now();
+
+            // Create 2D measurement vector [px, py]
+            std::vector<double> measurement = {right_toe.x, right_toe.y};
+            
+            // Call the wrapper to get corrected and predicted states
+            std::vector<KalmanState> states = kf_right_wrapper.update_and_predict_frequency_gap(measurement, current_msg_stamp);
+
+            pure_kalman_duration += (ros::Time::now() - kalman_start_time);
+
+            // Iterate through all returned states and write them to the bag
+            for (const auto& state_pair : states) {
+                ros::Time stamp = state_pair.first;
+                const std::vector<double>& state = state_pair.second;
+
+                // Create and write the PointStamped message
+                geometry_msgs::PointStamped toes_msg;
+                toes_msg.header.stamp = stamp;
+                toes_msg.header.frame_id = "base_link";
+                toes_msg.point.x = state[0];
+                toes_msg.point.y = state[1];
+                toes_msg.point.z = 0.0; // Z is not in the state
+                outBag.write("right_toe_position_kalman", stamp, toes_msg);
+            }
+
+            // Also write the raw measurement for comparison
+            geometry_msgs::PointStamped measured_toes;
+            measured_toes.header.stamp = current_msg_stamp;
+            measured_toes.header.frame_id = "base_link";
+            measured_toes.point = detected_right_toe;
+            outBag.write("right_toe_position", current_msg_stamp, measured_toes);
+            measured_toes.point = right_toe;
+            outBag.write("right_toe_position_swaped", current_msg_stamp, measured_toes);
+        }
+
+        if (any_toe_detected) {
+            written_message_count++;
             last_real_stamp = current_msg_stamp;
         }
     }

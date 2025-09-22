@@ -4,7 +4,7 @@
         <param name="bag_file_path" value="/home/docker/ros_ws/data/KATE_AA_U010_16_yellow_line_force_right_60-1_2025-08-07-18-58-52.bag" />
         <param name="camera_depth_frame_id" value="lower_legs_camera_rgb_optical_frame" />
 
-        <rosparam command="load" file="$(find camera_lower_leg_tracking)/include/KalmanFilterParameters_toe_positions_9D.yaml"/>
+        <rosparam command="load" file="$(find camera_lower_leg_tracking)/include/KalmanFilterParameters_toe_positions_6D.yaml"/>
         <param name="target_frequency" value="29.0" />
         <param name="max_prediction_time" value="0.3" />
 
@@ -16,6 +16,8 @@
         <param name="downsample_point_size" value="0.01" />
         <param name="cluster_tolerance" value="0.03" />
         <param name="min_cluster_size" value="150" />
+        <param name="likelihood_threshold" value="0.0" />
+        <param name="swap_distance_threshold_ratio" value="0.6" />
     </node>
 
 </launch>

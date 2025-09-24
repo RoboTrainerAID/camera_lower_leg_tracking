@@ -3,27 +3,25 @@
  <tabbed_widget name="Main Window" parent="main_window">
   <Tab containers="1" tab_name="tab1">
    <Container>
-    <DockSplitter count="2" orientation="-" sizes="0.5;0.5">
+    <DockSplitter sizes="0.500773;0.499227" count="2" orientation="-">
      <DockArea name="...">
-      <plot style="Lines" flip_x="false" flip_y="false" mode="TimeSeries">
-       <range left="0.000000" top="-0.200403" bottom="-1.015175" right="13.880321"/>
+      <plot mode="TimeSeries" flip_x="false" style="Lines" flip_y="false">
+       <range left="0.000000" top="-0.151749" bottom="-1.042950" right="13.880321"/>
        <limitY/>
-       <curve name="left_toe_position/point/x" color="#1f77b4"/>
-       <curve name="right_toe_position/point/x" color="#d62728"/>
-       <curve name="left_toe_position_kalman/point/x" color="#1ac938"/>
-       <curve name="right_toe_position_kalman/point/x" color="#ff7f0e"/>
-       <curve name="left_toe_position/point/y" color="#1ac938"/>
-       <curve name="right_toe_position/point/y" color="#ff7f0e"/>
-       <curve name="left_toe_position_swaped/point/x" color="#f14cc1"/>
-       <curve name="right_toe_position_swaped/point/x" color="#9467bd"/>
+       <curve name="/toe_position/left/original/point/x" color="#1ac938"/>
+       <curve name="/toe_position/left/swaped/point/x" color="#ff7f0e"/>
+       <curve name="/toe_position/left/kalman/point/x" color="#f14cc1"/>
+       <curve name="/toe_position/right/original/point/x" color="#9467bd"/>
+       <curve name="/toe_position/right/swaped/point/x" color="#17becf"/>
+       <curve name="/toe_position/right/kalman/point/x" color="#bcbd22"/>
       </plot>
      </DockArea>
      <DockArea name="...">
-      <plot style="Lines" flip_x="false" flip_y="false" mode="TimeSeries">
+      <plot mode="TimeSeries" flip_x="false" style="Lines" flip_y="false">
        <range left="0.000000" top="1.289911" bottom="-0.010967" right="13.880321"/>
        <limitY/>
-       <curve name="distance/swapped/data" color="#1f77b4"/>
-       <curve name="distance/not_swapped/data" color="#d62728"/>
+       <curve name="/toe_position/distance/not_swapped/data" color="#1f77b4"/>
+       <curve name="/toe_position/distance/swapped/data" color="#d62728"/>
       </plot>
      </DockArea>
     </DockSplitter>
@@ -36,7 +34,7 @@
  <!-- - - - - - - - - - - - - - - -->
  <Plugins>
   <plugin ID="DataLoad CSV">
-   <default delimiter="0" time_axis=""/>
+   <default time_axis="" delimiter="0"/>
   </plugin>
   <plugin ID="DataLoad MCAP"/>
   <plugin ID="DataLoad ROS bags">
@@ -69,8 +67,8 @@
  </Plugins>
  <!-- - - - - - - - - - - - - - - -->
  <previouslyLoaded_Datafiles>
-  <fileInfo filename="../../../data/toe_positions.bag" prefix="">
-   <selected_datasources value="distance/not_swapped;distance/swapped;left_toe_position;left_toe_position_kalman;right_toe_position;right_toe_position_kalman;left_toe_position_swaped;right_toe_position_swaped"/>
+  <fileInfo prefix="" filename="../../../data/toe_positions.bag">
+   <selected_datasources value="/toe_position/distance/not_swapped;/toe_position/right/swaped;/toe_position/right/original;/toe_position/right/kalman;/toe_position/left/swaped;/toe_position/left/original;/toe_position/left/kalman;/toe_position/distance/swapped"/>
    <plugin ID="DataLoad ROS bags">
     <use_header_stamp value="false"/>
     <discard_large_arrays value="true"/>

@@ -1,6 +1,9 @@
 #include <ros/ros.h>
 #include "../include/toe_detection.h"
 #include "../include/frequency_locked_kalman_filter.h"
+#include <std_msgs/Float64.h>
+#include <deque>
+#include <numeric>
 
 // The following block is a workaround for the fact that rosbag includes lz4.h which defines symbols that conflict with pcl's use of lz4.
 // See https://github.com/ethz-asl/lidar_align/issues/16#issuecomment-504348488
@@ -21,9 +24,6 @@
 #define LZ4_decompress_fast_continue LZ4_decompress_fast_continue_deprecated
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
-#include <std_msgs/Float64.h>
-#include <deque>
-#include <numeric>
 #undef LZ4_stream_t
 #undef LZ4_resetStream
 #undef LZ4_createStream
@@ -93,8 +93,8 @@ int main(int argc, char **argv) {
     ros::param::param<int>("~/min_cluster_size", min_cluster_size, 150);
     ros::param::param<double>("~/target_frequency", target_frequency, 20.0);
     ros::param::param<double>("~/max_prediction_time", max_prediction_time, 0.25); // Max time to predict into the future
-    ros::param::param<double>("~/likelihood_threshold", likelihood_threshold, 0.6); // Likelihood for outlier rejection
-    ros::param::param<double>("~/swap_distance_threshold_ratio", swap_distance_threshold_ratio, 0.5); // Ratio for distance-based swapping
+    ros::param::param<double>("~/likelihood_threshold", likelihood_threshold, 0.6); // Min likelihood, outliers below will be rejected
+    ros::param::param<double>("~/swap_distance_threshold_ratio", swap_distance_threshold_ratio, 0.5); // Ratio for distance-based swapping, e.g. 0.5 means swapped distance must be less than half of non-swapped to trigger swap
 
     // Instantiate two Kalman Filter wrappers, one for each toe
     FrequencyLockedKalmanFilter kf_left_wrapper("KalmanFilter", target_frequency, max_prediction_time, likelihood_threshold);
@@ -111,7 +111,12 @@ int main(int argc, char **argv) {
     // Define topics to read.
     std::vector<std::string> tf_topics = {"/tf_static", "/tf"};
     std::vector<std::string> pc_topics = {"/lower_legs_camera/depth_registered/points"};
-
+    
+    // Process the bag and write toe positions.
+    rosbag::View pc_view(bag, rosbag::TopicQuery(pc_topics));
+    rosbag::Bag outBag;
+    outBag.open("/home/docker/ros_ws/data/toe_positions.bag", rosbag::bagmode::Write);
+    
     // Create a view to iterate over tf messages and populate the buffer.
     rosbag::View tf_view(bag, rosbag::TopicQuery(tf_topics));
     tf2_ros::Buffer tfBuffer;
@@ -126,6 +131,7 @@ int main(int argc, char **argv) {
                         ROS_WARN("Failed to set transform: %s", ex.what());
                     }
                 }
+                outBag.write(m.getTopic(), m.getTime(), m);
             }
         }
     }
@@ -139,10 +145,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Process the bag and write toe positions.
-    rosbag::View pc_view(bag, rosbag::TopicQuery(pc_topics));
-    rosbag::Bag outBag;
-    outBag.open("/home/docker/ros_ws/data/toe_positions.bag", rosbag::bagmode::Write);
 
     ros::Time total_loop_start_time = ros::Time::now();
     ros::Duration pure_processing_duration(0.0), pure_kalman_duration(0.0);
@@ -150,7 +152,7 @@ int main(int argc, char **argv) {
     bool is_first_message = true;
     int message_count = 0;
     int written_message_count = 0;
-    int consecutive_swappings = 0;
+    int predicted_message_count = 0;
 
     std::deque<geometry_msgs::Point> left_history;
     std::deque<geometry_msgs::Point> right_history;
@@ -193,9 +195,8 @@ int main(int argc, char **argv) {
         
         // --- Swapping logic based on distance to rolling average or Likelihood ---
         bool grace_period_is_over = (current_msg_stamp - first_msg_stamp) > ros::Duration(10 * max_prediction_time);
-        bool max_consecutive_swappings_reached = (consecutive_swappings >= 100);
             
-        if (grace_period_is_over && !max_consecutive_swappings_reached) {
+        if (grace_period_is_over) {
             // Only perform swapping after an initial period to allow filters to stabilize
             bool left_valid = (left_toe.x != 0.0 || left_toe.y != 0.0 || left_toe.z != 0.0);
             bool right_valid = (right_toe.x != 0.0 || right_toe.y != 0.0 || right_toe.z != 0.0);
@@ -216,10 +217,10 @@ int main(int argc, char **argv) {
                 // rr_msg.data = rr;
                 // lr_msg.data = lr;
                 // rl_msg.data = rl;
-                // outBag.write("likelihood/left_kf_left_toe", current_msg_stamp, ll_msg);
-                // outBag.write("likelihood/right_kf_right_toe", current_msg_stamp, rr_msg);
-                // outBag.write("likelihood/left_kf_right_toe", current_msg_stamp, lr_msg);
-                // outBag.write("likelihood/right_kf_left_toe", current_msg_stamp, rl_msg);
+                // outBag.write("/toe_position/likelihood/left_kf_left_toe", current_msg_stamp, ll_msg);
+                // outBag.write("/toe_position/likelihood/right_kf_right_toe", current_msg_stamp, rr_msg);
+                // outBag.write("/toe_position/likelihood/left_kf_right_toe", current_msg_stamp, lr_msg);
+                // outBag.write("/toe_position/likelihood/right_kf_left_toe", current_msg_stamp, rl_msg);
 
                 // // If the swapped configuration has a higher combined likelihood, swap the toes.
                 // bool swap_condition = (lr + rl) > (ll + rr);
@@ -236,8 +237,8 @@ int main(int argc, char **argv) {
                 std_msgs::Float64 dist_swapped_msg, dist_not_swapped_msg;
                 dist_swapped_msg.data = dist_swapped;
                 dist_not_swapped_msg.data = dist_not_swapped;
-                outBag.write("distance/swapped", current_msg_stamp, dist_swapped_msg);
-                outBag.write("distance/not_swapped", current_msg_stamp, dist_not_swapped_msg);
+                outBag.write("/toe_position/distance/swapped", current_msg_stamp, dist_swapped_msg);
+                outBag.write("/toe_position/distance/not_swapped", current_msg_stamp, dist_not_swapped_msg);
 
                 // Swap if the swapped distance is significantly smaller (e.g., less than ratio * non-swapped)
                 bool swap_condition = (dist_swapped < swap_distance_threshold_ratio * dist_not_swapped);
@@ -246,18 +247,8 @@ int main(int argc, char **argv) {
                     ROS_INFO("Swapping detected legs based on average distance.");
                     std::swap(left_toe, right_toe);
                     
-                    consecutive_swappings++;
-                } else {
-                    // No swap was needed, so reset the consecutive counter.
-                    consecutive_swappings = 0;
                 }
-            } else {
-                // Legs are not valid or filters not ready, reset counter.
-                consecutive_swappings = 0;
             }
-        } else if (max_consecutive_swappings_reached) {
-            // Prevent to keep stuck in a swapping state
-            consecutive_swappings = 0;
         }
 
         // Update history with current (potentially swapped) measurements
@@ -301,7 +292,8 @@ int main(int argc, char **argv) {
                 toes_msg.point.x = state[0];
                 toes_msg.point.y = state[1];
                 toes_msg.point.z = 0.0; // Z is not in the state
-                outBag.write("left_toe_position_kalman", stamp, toes_msg);
+                outBag.write("/toe_position/left/kalman", stamp, toes_msg);
+                predicted_message_count++;
             }
 
             // Also write the raw measurement for comparison
@@ -309,9 +301,9 @@ int main(int argc, char **argv) {
             measured_toes.header.stamp = current_msg_stamp;
             measured_toes.header.frame_id = "base_link";
             measured_toes.point = detected_left_toe;
-            outBag.write("left_toe_position", current_msg_stamp, measured_toes);
+            outBag.write("/toe_position/left/original", current_msg_stamp, measured_toes);
             measured_toes.point = left_toe;
-            outBag.write("left_toe_position_swaped", current_msg_stamp, measured_toes);
+            outBag.write("/toe_position/left/swaped", current_msg_stamp, measured_toes);
         }
 
         // --- Process Right Toe ---
@@ -339,7 +331,8 @@ int main(int argc, char **argv) {
                 toes_msg.point.x = state[0];
                 toes_msg.point.y = state[1];
                 toes_msg.point.z = 0.0; // Z is not in the state
-                outBag.write("right_toe_position_kalman", stamp, toes_msg);
+                outBag.write("/toe_position/right/kalman", stamp, toes_msg);
+                predicted_message_count++;
             }
 
             // Also write the raw measurement for comparison
@@ -347,9 +340,9 @@ int main(int argc, char **argv) {
             measured_toes.header.stamp = current_msg_stamp;
             measured_toes.header.frame_id = "base_link";
             measured_toes.point = detected_right_toe;
-            outBag.write("right_toe_position", current_msg_stamp, measured_toes);
+            outBag.write("/toe_position/right/original", current_msg_stamp, measured_toes);
             measured_toes.point = right_toe;
-            outBag.write("right_toe_position_swaped", current_msg_stamp, measured_toes);
+            outBag.write("/toe_position/right/swaped", current_msg_stamp, measured_toes);
         }
 
         if (any_toe_detected) {
@@ -372,6 +365,7 @@ int main(int argc, char **argv) {
     ROS_INFO("Total PCL messages read: %d", message_count);
     ROS_INFO("Toe position messages written: %d", written_message_count);
     ROS_INFO("Message loss: %.2f%%", message_loss_percentage);
+    ROS_INFO("Kalman predicted messages written: %d", predicted_message_count);
     ROS_INFO("Total loop time (read + process + write): %.4f s", total_loop_duration.toSec());
     ROS_INFO("Pure PCL processing time: %.4f s", pure_processing_duration.toSec());
     ROS_INFO("Pure Kalman filter time: %.4f s", pure_kalman_duration.toSec());

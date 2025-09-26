@@ -77,12 +77,13 @@ int main(int argc, char **argv) {
     ros::NodeHandle nh;
 
     // Get parameters including filtering/clustering values.
-    std::string bag_file_path;
+    std::string input_bag_path, output_bag_path;
     std::string camera_depth_frame_id = "camera_depth_frame";
     double min_z, max_z, min_y, max_y, cluster_tolerance, downsample_point_size, target_frequency, max_prediction_time, likelihood_threshold, swap_distance_threshold_ratio;
     int min_cluster_size;
 
-    ros::param::param<std::string>("~/bag_file_path", bag_file_path, "test.bag");
+    ros::param::param<std::string>("~/input_bag_path", input_bag_path, "test.bag");
+    ros::param::param<std::string>("~/output_bag_path", output_bag_path, "toe_positions_output.bag");
     ros::param::param<std::string>("~/camera_depth_frame_id", camera_depth_frame_id, "camera_depth_frame");
     ros::param::param<double>("~/min_z", min_z, 0.01);
     ros::param::param<double>("~/max_z", max_z, 0.3);
@@ -102,7 +103,8 @@ int main(int argc, char **argv) {
 
     rosbag::Bag bag;
     try {
-        bag.open(bag_file_path, rosbag::bagmode::Read);
+        bag.open(input_bag_path, rosbag::bagmode::Read);
+        ROS_INFO("Reading from bag file: %s", input_bag_path.c_str());
     } catch(rosbag::BagIOException &ex){
         ROS_ERROR("Error opening bag file: %s", ex.what());
         return 1;
@@ -115,7 +117,13 @@ int main(int argc, char **argv) {
     // Process the bag and write toe positions.
     rosbag::View pc_view(bag, rosbag::TopicQuery(pc_topics));
     rosbag::Bag outBag;
-    outBag.open("/home/docker/ros_ws/data/toe_positions.bag", rosbag::bagmode::Write);
+    try {
+        outBag.open(output_bag_path, rosbag::bagmode::Write);
+        ROS_INFO("Writing to output bag file: %s", output_bag_path.c_str());
+    } catch(rosbag::BagIOException &ex){
+        ROS_ERROR("Error opening output bag file: %s", ex.what());
+        return 1;
+    }
     
     // Create a view to iterate over tf messages and populate the buffer.
     rosbag::View tf_view(bag, rosbag::TopicQuery(tf_topics));

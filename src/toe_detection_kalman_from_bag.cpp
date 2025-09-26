@@ -73,7 +73,7 @@ void print_state(const std::string& label, const std::vector<double>& state) {
 }
 
 int main(int argc, char **argv) {
-    ros::init(argc, argv, "read_rosbag");
+    ros::init(argc, argv, "toe_detection_kalman_from_bag");
     ros::NodeHandle nh;
 
     // Get parameters including filtering/clustering values.

@@ -1,7 +1,9 @@
 <?xml version="1.0"?>
 <launch>
-    <node pkg="camera_lower_leg_tracking" name="read_rosbag" type="read_rosbag" output="screen">
-        <param name="bag_file_path" value="/home/docker/ros_ws/data/KATE_AA_U010_16_yellow_line_force_right_60-1_2025-08-07-18-58-52.bag" />
+    <arg name="bag_file_path" default="/home/docker/ros_ws/data/KATE_AA_U010_16_yellow_line_force_right_60-1_2025-08-07-18-58-52.bag" />
+
+    <node pkg="camera_lower_leg_tracking" name="toe_detection_kalman_from_bag" type="toe_detection_kalman_from_bag" output="screen">
+        <param name="bag_file_path" value="$(arg bag_file_path)" />
         <param name="camera_depth_frame_id" value="lower_legs_camera_rgb_optical_frame" />
 
         <rosparam command="load" file="$(find camera_lower_leg_tracking)/include/KalmanFilterParameters_toe_positions_6D.yaml"/>

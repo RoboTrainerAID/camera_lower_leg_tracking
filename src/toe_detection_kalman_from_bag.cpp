@@ -75,6 +75,7 @@ void print_state(const std::string& label, const std::vector<double>& state) {
 int main(int argc, char **argv) {
     ros::init(argc, argv, "toe_detection_kalman_from_bag");
     ros::NodeHandle nh;
+    ros::Time startup_time = ros::Time::now();
 
     // Get parameters including filtering/clustering values.
     std::string input_bag_path, output_bag_path;
@@ -126,6 +127,7 @@ int main(int argc, char **argv) {
     }
     
     // Create a view to iterate over tf messages and populate the buffer.
+    ros::Time tf_processing_start_time = ros::Time::now();
     rosbag::View tf_view(bag, rosbag::TopicQuery(tf_topics));
     tf2_ros::Buffer tfBuffer;
     for (const rosbag::MessageInstance& m : tf_view) {
@@ -155,7 +157,9 @@ int main(int argc, char **argv) {
 
 
     ros::Time total_loop_start_time = ros::Time::now();
-    ros::Duration pure_processing_duration(0.0), pure_kalman_duration(0.0);
+    ros::Duration pure_processing_duration(0.0), pure_kalman_duration(0.0), tf_duration(0.0), startup_duration(0.0);
+    tf_duration = total_loop_start_time - tf_processing_start_time;
+    startup_duration = total_loop_start_time - startup_time;
     ros::Time first_msg_stamp, last_real_stamp;
     bool is_first_message = true;
     int message_count = 0;
@@ -167,6 +171,12 @@ int main(int argc, char **argv) {
     const size_t history_size = 3;
 
     for (const rosbag::MessageInstance& m : pc_view) {
+        // Add a check for ros::ok() at the beginning of the loop.
+        if (!ros::ok()) {
+            ROS_WARN("Shutdown signal received, stopping bag processing.");
+            break; // Exit the loop gracefully
+        }
+
         sensor_msgs::PointCloud2::ConstPtr pc_msg = m.instantiate<sensor_msgs::PointCloud2>();
         if (pc_msg == nullptr) continue;
 
@@ -375,6 +385,8 @@ int main(int argc, char **argv) {
     ROS_INFO("Message loss: %.2f%%", message_loss_percentage);
     ROS_INFO("Kalman predicted messages written: %d", predicted_message_count);
     ROS_INFO("Total loop time (read + process + write): %.4f s", total_loop_duration.toSec());
+    ROS_INFO("Startup time (until first bag read): %.4f s", startup_duration.toSec());
+    ROS_INFO("TF processing time: %.4f s", tf_duration.toSec());
     ROS_INFO("Pure PCL processing time: %.4f s", pure_processing_duration.toSec());
     ROS_INFO("Pure Kalman filter time: %.4f s", pure_kalman_duration.toSec());
     ROS_INFO("Bag duration (time between first/last msg): %.4f s", bag_duration.toSec());

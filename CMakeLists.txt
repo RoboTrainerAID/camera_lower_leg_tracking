@@ -161,8 +161,19 @@ target_link_libraries(toe_detection_node ${catkin_LIBRARIES})
 add_executable(fix_foot_axis src/fix_foot_axis.cpp)
 target_link_libraries(fix_foot_axis ${catkin_LIBRARIES})
 
-add_executable(toe_detection_kalman_from_bag src/toe_detection_kalman_from_bag.cpp src/toe_detection.cpp src/frequency_locked_kalman_filter.cpp)
+add_executable(toe_detection_kalman_from_bag 
+  src/toe_detection_kalman_from_bag.cpp 
+  src/toe_detection.cpp 
+  src/frequency_locked_kalman_filter.cpp
+  src/kalman_processing_from_bag.cpp)
 target_link_libraries(toe_detection_kalman_from_bag ${catkin_LIBRARIES})
+
+add_executable(toe_detection_kalman_from_bag_node
+  src/toe_detection_kalman_from_bag_node.cpp
+  src/toe_detection.cpp 
+  src/frequency_locked_kalman_filter.cpp
+  src/kalman_processing_from_bag.cpp)
+target_link_libraries(toe_detection_kalman_from_bag_node ${catkin_LIBRARIES})
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the
